@@ -469,7 +469,10 @@ function ProjectEditor() {
     const activeTL = getActiveTimeline();
     if (activeTL) {
       if (activeTL.paused()) {
-        if (activeTL.progress() >= 0.99) {
+        // Use time() check — progress() is unreliable on globalTimeline
+        const dur = getCleanDuration(activeTL);
+        const currentT = typeof activeTL.time === "function" ? activeTL.time() : 0;
+        if (dur > 0 && currentT >= dur * 0.99) {
           activeTL.restart();
         } else {
           activeTL.play();
@@ -541,10 +544,13 @@ function ProjectEditor() {
 
     const activeTL = getActiveTimeline();
     if (activeTL) {
-      if (typeof activeTL.progress === "function") {
-        activeTL.progress(normalizedProgress);
+      // Use time() not progress() — progress() is broken on globalTimeline
+      // (globalTimeline.duration() ≈ 10B, so progress(0.5) = 5 billion seconds)
+      const targetTime = normalizedProgress * totalDuration;
+      if (typeof activeTL.time === "function") {
+        activeTL.time(targetTime);
       } else if (typeof activeTL.seek === "function") {
-        activeTL.seek(normalizedProgress * totalDuration);
+        activeTL.seek(targetTime);
       }
     }
   };
@@ -558,292 +564,294 @@ function ProjectEditor() {
   };
 
   // ---------------------------------------------------------------------------
-  // COMPLETE REBUILD: WebCodecs VideoEncoder + mp4-muxer / webm-muxer
-  // THE FIX: Explicit per-frame timestamps (frame * 1_000_000/fps µs).
-  // html2canvas can take 100-200ms per frame but timestamps are 100% deterministic.
+  // REBUILT EXPORT ENGINE — Uses time() NOT progress() for timeline seeking.
+  //
+  // ROOT CAUSE of slideshow bug:
+  //   globalTimeline.duration() ≈ 10,000,000,000 (GSAP sentinel).
+  //   progress(0.5) = seeking to 5 billion seconds = every frame at end state.
+  //   time(2.75) = correctly seeks to 2.75 seconds on ANY timeline.
+  //
+  // WebCodecs VideoEncoder + mp4-muxer for explicit per-frame timestamps.
   // ---------------------------------------------------------------------------
   const handleRenderDownloadVideo = async () => {
     const iframe = iframeRef.current;
-    if (!iframe) { setRenderError("Iframe canvas reference is not mounted."); return; }
+    if (!iframe) { setRenderError("Iframe not mounted."); return; }
 
     const iframeWin = iframe.contentWindow as any;
     const iframeDoc = iframe.contentDocument;
     if (!iframeWin || !iframeDoc || !iframeDoc.body) {
-      setRenderError("Iframe document is not accessible. Ensure preview is loaded.");
+      setRenderError("Iframe document not accessible.");
       return;
     }
 
     if (typeof iframeWin.html2canvas !== "function") {
-      setRenderError("html2canvas is not loaded in the preview. Please wait a moment and try again.");
+      setRenderError("html2canvas not loaded yet. Wait a moment and try again.");
       return;
     }
 
-    const activeTL = getActiveTimeline();
-    if (!activeTL) {
-      setRenderError("No active GSAP animation timeline detected. Run the animation first.");
+    // Get the GSAP instance from the iframe
+    const gsapInst = iframeWin.gsap;
+    if (!gsapInst) {
+      setRenderError("GSAP not found in iframe. Run the animation first.");
       return;
     }
 
-    // Setup render state
+    // ── Determine what to seek: prefer timelineRef, else globalTimeline ──────
+    const userTL = timelineRef.current;         // user-created timeline (buildLiveAnimation)
+    const globalTL = gsapInst.globalTimeline;    // fallback: all gsap.to() calls
+
+    const seekTarget = userTL ?? globalTL;       // what we'll call .time() on
+    if (!seekTarget) {
+      setRenderError("No animation timeline found. Run the animation first.");
+      return;
+    }
+
+    // ── Compute the REAL animation duration (not globalTimeline's 10B) ────────
+    const exactDuration = getCleanDuration(seekTarget);
+    if (exactDuration <= 0 || !isFinite(exactDuration)) {
+      setRenderError(`Invalid animation duration: ${exactDuration}s. Ensure your animation has visible tweens.`);
+      return;
+    }
+
+    // ── Setup UI state ───────────────────────────────────────────────────────
     setIsRendering(true);
     setRenderError(null);
     setCurrentRenderFrame(0);
     setRenderProgress(0);
     setRenderedVideoUrl(null);
 
-    const wasPausedBefore = activeTL.paused();
-    activeTL.pause();
+    const wasPaused = seekTarget.paused?.() ?? false;
+    seekTarget.pause();
     setIsPlaying(false);
-    if (typeof activeTL.repeat === "function") activeTL.repeat(0);
-    if (typeof activeTL.eventCallback === "function") activeTL.eventCallback("onComplete", null);
+
+    // Disable repeat/looping during export
+    if (typeof seekTarget.repeat === "function") seekTarget.repeat(0);
+    if (typeof seekTarget.eventCallback === "function") {
+      seekTarget.eventCallback("onComplete", null);
+      seekTarget.eventCallback("onUpdate", null);
+    }
+
+    const selectedFPS = framerate;
+    const totalFrames = Math.max(1, Math.ceil(exactDuration * selectedFPS));
+
+    setTotalDuration(exactDuration);
+    setTotalRenderFrames(totalFrames);
 
     try {
-      const exactDuration = getCleanDuration(activeTL);
-      const selectedFPS = framerate;
-      const totalFrames = Math.max(1, Math.ceil(exactDuration * selectedFPS));
+      // ── Resolution ─────────────────────────────────────────────────────────
+      let exportW = 1920, exportH = 1080;
+      if (aspectRatio === "9:16") { exportW = 1080; exportH = 1920; }
+      else if (aspectRatio === "1:1") { exportW = 1080; exportH = 1080; }
 
-      setTotalDuration(exactDuration);
-      setTotalRenderFrames(totalFrames);
+      // ── Composite canvas (used for WebCodecs VideoFrame source) ────────────
+      const outCanvas = document.createElement("canvas");
+      outCanvas.width = exportW;
+      outCanvas.height = exportH;
+      const ctx = outCanvas.getContext("2d")!;
 
-      let exportWidth = 1920;
-      let exportHeight = 1080;
-      if (aspectRatio === "9:16") { exportWidth = 1080; exportHeight = 1920; }
-      else if (aspectRatio === "1:1") { exportWidth = 1080; exportHeight = 1080; }
-
-      // Output composite canvas
-      const outputCanvas = document.createElement("canvas");
-      outputCanvas.width = exportWidth;
-      outputCanvas.height = exportHeight;
-      const ctx = outputCanvas.getContext("2d", { willReadFrequently: false });
-      if (!ctx) throw new Error("Cannot create 2D canvas context for output.");
-
-      // Target element inside iframe (GSAP writes transforms here)
+      // ── Target element inside iframe ───────────────────────────────────────
       const targetEl: HTMLElement =
-        (iframeDoc.getElementById("kanto-root") as HTMLElement | null) ??
-        (iframeDoc.querySelector("#app-viewport") as HTMLElement | null) ??
+        (iframeDoc.getElementById("kanto-root") as HTMLElement) ??
+        (iframeDoc.querySelector("#app-viewport") as HTMLElement) ??
         iframeDoc.body;
 
-      const captureW = Math.max(iframeWin.innerWidth || targetEl.offsetWidth || 1920, 1);
-      const captureH = Math.max(iframeWin.innerHeight || targetEl.offsetHeight || 1080, 1);
-      const scaleFactor = Math.max(exportWidth / captureW, exportHeight / captureH);
+      const viewW = Math.max(iframeWin.innerWidth || targetEl.offsetWidth || exportW, 1);
+      const viewH = Math.max(iframeWin.innerHeight || targetEl.offsetHeight || exportH, 1);
+      const scale = Math.max(exportW / viewW, exportH / viewH);
 
       if (iframeDoc.fonts?.ready) await iframeDoc.fonts.ready;
 
-      const h2cOptions: Record<string, unknown> = {
-        width: captureW,
-        height: captureH,
-        scale: scaleFactor,
-        useCORS: true,
-        allowTaint: true,
-        logging: false,
-        backgroundColor: bgMode === "transparent" ? null
-          : bgMode === "white" ? "#ffffff"
-          : customBgColor,
-        imageTimeout: 0,
-        removeContainer: true,
-        windowWidth: captureW,
-        windowHeight: captureH,
+      const h2cOpts: Record<string, unknown> = {
+        width: viewW, height: viewH, scale,
+        useCORS: true, allowTaint: true, logging: false,
+        backgroundColor: bgMode === "transparent" ? null : bgMode === "white" ? "#ffffff" : customBgColor,
+        imageTimeout: 0, removeContainer: true,
+        windowWidth: viewW, windowHeight: viewH,
       };
 
-      // Helper: composite a captured frame onto outputCanvas with bg + centering
-      const composite = (fc: HTMLCanvasElement) => {
-        ctx.clearRect(0, 0, exportWidth, exportHeight);
-        if (bgMode === "white") { ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, exportWidth, exportHeight); }
-        else if (bgMode === "custom") { ctx.fillStyle = customBgColor; ctx.fillRect(0, 0, exportWidth, exportHeight); }
-        const ds = Math.max(exportWidth / fc.width, exportHeight / fc.height);
-        const dw = fc.width * ds;
-        const dh = fc.height * ds;
-        ctx.drawImage(fc, (exportWidth - dw) / 2, (exportHeight - dh) / 2, dw, dh);
+      // ── Helper: draw captured frame to output canvas with bg ───────────────
+      const compositeFrame = (fc: HTMLCanvasElement) => {
+        ctx.clearRect(0, 0, exportW, exportH);
+        if (bgMode === "white") { ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, exportW, exportH); }
+        else if (bgMode === "custom") { ctx.fillStyle = customBgColor; ctx.fillRect(0, 0, exportW, exportH); }
+        const s = Math.max(exportW / fc.width, exportH / fc.height);
+        const w = fc.width * s, h = fc.height * s;
+        ctx.drawImage(fc, (exportW - w) / 2, (exportH - h) / 2, w, h);
       };
 
-      // ══════════════════════════════════════════════════════════════════════════
-      // PHASE 1 (0–50%): Capture all frames as html2canvas snapshots
-      // Decoupled from encode so timestamps are NOT affected by render time.
-      // ══════════════════════════════════════════════════════════════════════════
-      const frameCanvases: HTMLCanvasElement[] = [];
+      // ════════════════════════════════════════════════════════════════════════
+      // PHASE 1 — Capture: step through animation using time(), not progress()
+      // Each frame captures EXACTLY what the user sees at that moment.
+      // ════════════════════════════════════════════════════════════════════════
+      const frames: HTMLCanvasElement[] = [];
 
-      for (let frame = 0; frame < totalFrames; frame++) {
-        const progress = totalFrames === 1 ? 0 : frame / (totalFrames - 1);
-        activeTL.progress(progress);
+      // Reset to start
+      seekTarget.time(0);
+      await new Promise<void>((r) =>
+        iframeWin.requestAnimationFrame(() => iframeWin.requestAnimationFrame(r))
+      );
 
-        // Double-rAF: wait for GSAP to flush layout + browser to repaint
+      for (let i = 0; i < totalFrames; i++) {
+        // ── CRITICAL FIX: use time() with absolute seconds ───────────────────
+        // time(x) = "go to x seconds" — works on ANY timeline including globalTimeline.
+        // progress(x) on globalTimeline = x * 10,000,000,000 = broken!
+        const targetTime = (i / (totalFrames - 1 || 1)) * exactDuration;
+        seekTarget.time(targetTime);
+
+        // Double-rAF: GSAP applies transforms → browser repaints → we capture
         await new Promise<void>((r) =>
           iframeWin.requestAnimationFrame(() => iframeWin.requestAnimationFrame(r))
         );
 
+        // Capture the live DOM state with html2canvas (inside iframe context)
         let fc: HTMLCanvasElement | null = null;
         try {
-          fc = await (iframeWin.html2canvas as (el: HTMLElement, opts: unknown) => Promise<HTMLCanvasElement>)(
-            targetEl, h2cOptions
-          );
+          fc = await iframeWin.html2canvas(targetEl, h2cOpts);
         } catch {
-          // On capture error, push a blank frame to maintain timeline position
+          // capture error — use blank
         }
 
         if (fc && fc.width > 0 && fc.height > 0) {
-          frameCanvases.push(fc);
+          frames.push(fc);
         } else {
-          // Blank placeholder
           const blank = document.createElement("canvas");
-          blank.width = exportWidth;
-          blank.height = exportHeight;
-          if (bgMode === "white") {
-            const bc = blank.getContext("2d");
-            if (bc) { bc.fillStyle = "#ffffff"; bc.fillRect(0, 0, exportWidth, exportHeight); }
-          }
-          frameCanvases.push(blank);
+          blank.width = exportW; blank.height = exportH;
+          const bc = blank.getContext("2d");
+          if (bc && bgMode === "white") { bc.fillStyle = "#fff"; bc.fillRect(0, 0, exportW, exportH); }
+          frames.push(blank);
         }
 
-        setCurrentRenderFrame(frame + 1);
-        setRenderProgress(Math.round(((frame + 1) / totalFrames) * 50));
-        await new Promise<void>((r) => setTimeout(r, 0)); // Yield for UI repaint
+        setCurrentRenderFrame(i + 1);
+        setRenderProgress(Math.round(((i + 1) / totalFrames) * 50));
+        await new Promise<void>((r) => setTimeout(r, 0));
       }
 
-      // ══════════════════════════════════════════════════════════════════════════
-      // PHASE 2 (50–100%): Encode with EXPLICIT timestamps — NO wall-clock time
-      // frame N gets timestamp = N * (1_000_000 / fps) microseconds exactly.
-      // ══════════════════════════════════════════════════════════════════════════
-      const frameDurationUs = Math.round(1_000_000 / selectedFPS);
-      const hasWebCodecs =
-        typeof (window as any).VideoEncoder === "function" &&
-        typeof (window as any).VideoFrame === "function";
+      // ════════════════════════════════════════════════════════════════════════
+      // PHASE 2 — Encode: explicit timestamps, completely decoupled from capture
+      // frame i → timestamp = i * (1,000,000 / fps) microseconds
+      // 5.5s animation @ 30fps = 165 frames × 33333µs = exactly 5.5s
+      // ════════════════════════════════════════════════════════════════════════
+      const frameDurUs = Math.round(1_000_000 / selectedFPS);
+      const hasWebCodecs = typeof (window as any).VideoEncoder === "function"
+        && typeof (window as any).VideoFrame === "function";
 
       let videoBlob: Blob;
 
       if (hasWebCodecs) {
-        // ── WebCodecs path: VP9 or H.264 with explicit timestamps ─────────────
-        let codecStr = "vp09.00.10.08";
-        let useMP4 = false;
+        // Detect H.264 support (→ MP4), fallback to VP9 (→ WebM)
+        let codec = "vp09.00.10.08";
+        let isMP4 = false;
         try {
-          const h264Check = await (window as any).VideoEncoder.isConfigSupported({
-            codec: "avc1.42001E", width: exportWidth, height: exportHeight,
+          const check = await (window as any).VideoEncoder.isConfigSupported({
+            codec: "avc1.42001E", width: exportW, height: exportH,
           });
-          if (h264Check.supported) { codecStr = "avc1.42001E"; useMP4 = true; }
-        } catch { /* use VP9 */ }
+          if (check.supported) { codec = "avc1.42001E"; isMP4 = true; }
+        } catch { /* VP9 */ }
 
-        const encodedChunks: EncodedVideoChunk[] = [];
-        const encodedMetas: EncodedVideoChunkMetadata[] = [];
+        const chunks: EncodedVideoChunk[] = [];
+        const metas: EncodedVideoChunkMetadata[] = [];
 
-        const encoder = new (window as any).VideoEncoder({
-          output: (chunk: EncodedVideoChunk, meta: EncodedVideoChunkMetadata) => {
-            encodedChunks.push(chunk);
-            encodedMetas.push(meta);
+        const enc = new (window as any).VideoEncoder({
+          output: (c: EncodedVideoChunk, m: EncodedVideoChunkMetadata) => {
+            chunks.push(c); metas.push(m);
           },
           error: (e: Error) => { throw e; },
         });
 
-        encoder.configure({
-          codec: codecStr,
-          width: exportWidth,
-          height: exportHeight,
-          bitrate: 10_000_000,
-          framerate: selectedFPS,
+        enc.configure({
+          codec, width: exportW, height: exportH,
+          bitrate: 10_000_000, framerate: selectedFPS,
           hardwareAcceleration: "prefer-hardware",
           latencyMode: "quality",
         });
 
-        for (let i = 0; i < frameCanvases.length; i++) {
-          composite(frameCanvases[i]);
-
-          const vf = new (window as any).VideoFrame(outputCanvas, {
-            timestamp: i * frameDurationUs,   // ← EXPLICIT: frame N is at N/fps seconds
-            duration: frameDurationUs,
+        for (let i = 0; i < frames.length; i++) {
+          compositeFrame(frames[i]);
+          const vf = new (window as any).VideoFrame(outCanvas, {
+            timestamp: i * frameDurUs,
+            duration: frameDurUs,
           });
-          encoder.encode(vf, { keyFrame: i % 30 === 0 });
+          enc.encode(vf, { keyFrame: i % 30 === 0 });
           vf.close();
 
           setCurrentRenderFrame(i + 1);
-          setRenderProgress(50 + Math.round(((i + 1) / frameCanvases.length) * 50));
+          setRenderProgress(50 + Math.round(((i + 1) / frames.length) * 50));
           await new Promise<void>((r) => setTimeout(r, 0));
         }
 
-        await encoder.flush();
-        encoder.close();
+        await enc.flush();
+        enc.close();
 
-        if (useMP4) {
+        // Mux into container
+        if (isMP4) {
           const { Muxer, ArrayBufferTarget } = await import("mp4-muxer");
-          const target = new ArrayBufferTarget();
-          const muxer = new Muxer({
-            target,
-            video: { codec: "avc", width: exportWidth, height: exportHeight },
+          const t = new ArrayBufferTarget();
+          const m = new Muxer({
+            target: t,
+            video: { codec: "avc", width: exportW, height: exportH },
             firstTimestampBehavior: "offset",
           });
-          for (let i = 0; i < encodedChunks.length; i++) {
-            muxer.addVideoChunk(encodedChunks[i], encodedMetas[i]);
-          }
-          muxer.finalize();
-          videoBlob = new Blob([target.buffer], { type: "video/mp4" });
+          for (let i = 0; i < chunks.length; i++) m.addVideoChunk(chunks[i], metas[i]);
+          m.finalize();
+          videoBlob = new Blob([t.buffer], { type: "video/mp4" });
         } else {
           const { Muxer, ArrayBufferTarget } = await import("webm-muxer");
-          const target = new ArrayBufferTarget();
-          const muxer = new Muxer({
-            target,
-            video: { codec: "V_VP9", width: exportWidth, height: exportHeight, frameRate: selectedFPS },
+          const t = new ArrayBufferTarget();
+          const m = new Muxer({
+            target: t,
+            video: { codec: "V_VP9", width: exportW, height: exportH, frameRate: selectedFPS },
           });
-          for (let i = 0; i < encodedChunks.length; i++) {
-            muxer.addVideoChunk(encodedChunks[i], encodedMetas[i]);
-          }
-          muxer.finalize();
-          videoBlob = new Blob([target.buffer], { type: "video/webm" });
+          for (let i = 0; i < chunks.length; i++) m.addVideoChunk(chunks[i], metas[i]);
+          m.finalize();
+          videoBlob = new Blob([t.buffer], { type: "video/webm" });
         }
       } else {
-        // ── Fallback: MediaRecorder, but we already have all frames captured
-        // so we can hold each frame for exactly 1/fps real seconds (timing is now fine)
-        const candidateMimes = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
-        const mimeType = candidateMimes.find(
-          (m) => typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(m)
-        ) ?? "video/webm";
-
-        const stream = outputCanvas.captureStream(selectedFPS);
-        const fallbackChunks: Blob[] = [];
-        const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 10_000_000 });
-        recorder.ondataavailable = (e) => { if (e.data?.size > 0) fallbackChunks.push(e.data); };
-
-        const recorderDone = new Promise<Blob>((resolve, reject) => {
-          recorder.onstop = () =>
-            fallbackChunks.length > 0
-              ? resolve(new Blob(fallbackChunks, { type: mimeType }))
-              : reject(new Error("MediaRecorder fallback: 0 bytes recorded."));
-          recorder.onerror = (e: any) => reject(e.error ?? new Error("MediaRecorder error."));
+        // ── MediaRecorder fallback ─────────────────────────────────────────────
+        const mimes = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
+        const mime = mimes.find(m => MediaRecorder.isTypeSupported(m)) ?? "video/webm";
+        const stream = outCanvas.captureStream(selectedFPS);
+        const blobs: Blob[] = [];
+        const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 10_000_000 });
+        rec.ondataavailable = (e) => { if (e.data?.size > 0) blobs.push(e.data); };
+        const done = new Promise<Blob>((ok, fail) => {
+          rec.onstop = () => blobs.length ? ok(new Blob(blobs, { type: mime })) : fail(new Error("No data"));
+          rec.onerror = (e: any) => fail(e.error ?? new Error("Recorder error"));
         });
-        recorder.start();
-
+        rec.start();
         const msPerFrame = 1000 / selectedFPS;
-        for (let i = 0; i < frameCanvases.length; i++) {
-          composite(frameCanvases[i]);
-          await new Promise<void>((r) => setTimeout(r, msPerFrame)); // hold exactly 1/fps seconds
+        for (let i = 0; i < frames.length; i++) {
+          compositeFrame(frames[i]);
+          await new Promise<void>((r) => setTimeout(r, msPerFrame));
           setCurrentRenderFrame(i + 1);
-          setRenderProgress(50 + Math.round(((i + 1) / frameCanvases.length) * 50));
+          setRenderProgress(50 + Math.round(((i + 1) / frames.length) * 50));
         }
-        recorder.stop();
-        videoBlob = await recorderDone;
+        rec.stop();
+        videoBlob = await done;
       }
 
-      // ── Explicit file download ────────────────────────────────────────────────
-      const downloadUrl = URL.createObjectURL(videoBlob);
-      const titleSlug = projectTitle.trim().replace(/\s+/g, "_") || "kanto_motion";
+      // ── Download ───────────────────────────────────────────────────────────
+      const url = URL.createObjectURL(videoBlob);
+      const slug = projectTitle.trim().replace(/\s+/g, "_") || "kanto_motion";
       const ext = videoBlob.type.includes("mp4") ? "mp4" : "webm";
-      const fileName = `${titleSlug}_${selectedFPS}fps.${ext}`;
 
       const a = document.createElement("a");
-      a.href = downloadUrl;
-      a.download = fileName;
+      a.href = url;
+      a.download = `${slug}_${selectedFPS}fps.${ext}`;
       a.style.display = "none";
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-
-      setTimeout(() => URL.revokeObjectURL(downloadUrl), 15_000);
-      setRenderedVideoUrl(downloadUrl);
+      setTimeout(() => URL.revokeObjectURL(url), 15_000);
+      setRenderedVideoUrl(url);
 
     } catch (err: any) {
-      console.error("Export Failed:", err);
-      setRenderError(err.message ?? "Unknown error during export.");
+      console.error("Export failed:", err);
+      setRenderError(err.message ?? "Unknown export error.");
     } finally {
       setIsRendering(false);
       try {
-        activeTL.progress(0);
-        if (!wasPausedBefore) { activeTL.play(); setIsPlaying(true); }
+        seekTarget.time(0);
+        if (!wasPaused) { seekTarget.play(); setIsPlaying(true); }
       } catch { /* ignore */ }
     }
   };
