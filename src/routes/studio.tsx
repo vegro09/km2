@@ -127,7 +127,8 @@ function Studio() {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(2.0);
   const [isLooping, setIsLooping] = useState(false);
-  const [isDraggingScrubber, setIsDraggingScrubber] = useState(false);
+
+  const [, setIsDraggingScrubber] = useState(false);
   const wasPlayingBeforeDrag = useRef(false);
 
   // Right Panel & Export States
@@ -138,6 +139,29 @@ function Studio() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isRendering, setIsRendering] = useState(false);
   const [renderedVideoUrl, setRenderedVideoUrl] = useState<string | null>(null);
+
+  // ---------------------------------------------------------------------------
+  // Helper: Retrieve Active GSAP Instance from Timeline or Iframe Window
+  // ---------------------------------------------------------------------------
+  const getActiveTimeline = useCallback(() => {
+    if (timelineRef.current) return timelineRef.current;
+    if (iframeRef.current?.contentWindow) {
+      const win = iframeRef.current.contentWindow as any;
+      if (win.gsap?.globalTimeline) return win.gsap.globalTimeline;
+    }
+    return null;
+  }, []);
+
+  // Helper: Extract finite single-iteration duration (ignoring repeat: -1 Infinity)
+  const getCleanDuration = useCallback((tl: any) => {
+    if (!tl) return 2.0;
+    // .duration() returns single iteration duration, whereas .totalDuration() includes repeats
+    const rawDur = typeof tl.duration === "function" ? tl.duration() : 2.0;
+    if (typeof rawDur === "number" && isFinite(rawDur) && rawDur > 0) {
+      return rawDur;
+    }
+    return 2.0;
+  }, []);
 
   // ---------------------------------------------------------------------------
   // 1. Live Canvas DOM Injection & GSAP Auto-Injection into Iframe
@@ -234,10 +258,12 @@ function Studio() {
     }
 
     const tl = gsapObj.timeline({
-      paused: true,
+      paused: false,
       repeat: isLooping ? -1 : 0,
       onUpdate: () => {
-        setCurrentTime(tl.time());
+        const singleDur = getCleanDuration(tl);
+        const t = tl.time() % singleDur;
+        setCurrentTime(t);
       },
       onComplete: () => {
         if (!isLooping) setIsPlaying(false);
@@ -277,11 +303,12 @@ function Studio() {
       }
     }
 
-    const totalDur = tl.duration() || 2.0;
-    setDuration(totalDur);
+    const cleanDur = getCleanDuration(tl);
+    setDuration(cleanDur);
     timelineRef.current = tl;
+    setIsPlaying(true);
     return tl;
-  }, [isLooping]);
+  }, [isLooping, getCleanDuration]);
 
   // ---------------------------------------------------------------------------
   // 3. Dynamic Script Injection Pipeline & Iframe Scope Execution Engine
@@ -333,21 +360,18 @@ function Studio() {
       newScript.textContent = `/* Kanto User Motion Script */\n${manualCode}`;
       iframeDoc.body.appendChild(newScript);
 
-      // Extract dynamic duration directly from active GSAP timeline instance
-      let calculatedDur = 2.0;
-      if (gsapObj && gsapObj.globalTimeline && gsapObj.globalTimeline.duration() > 0) {
-        calculatedDur = gsapObj.globalTimeline.duration();
-      } else if (gsapObj && gsapObj.exportRoot) {
-        const rootTL = gsapObj.exportRoot();
-        calculatedDur = rootTL.duration();
+      // Task 1: Extract finite single-iteration duration
+      let cleanDur = 2.0;
+      if (gsapObj.globalTimeline) {
+        cleanDur = getCleanDuration(gsapObj.globalTimeline);
       }
       
-      setDuration(calculatedDur > 0 ? calculatedDur : 2.0);
+      setDuration(cleanDur);
       setIsPlaying(true);
     } catch (err: any) {
       setManualGsapError(err.message || "Syntax or Execution Error in GSAP Code");
     }
-  }, [manualCode]);
+  }, [manualCode, getCleanDuration]);
 
   // Listen for iframe scope errors via postMessage fallback
   useEffect(() => {
@@ -370,49 +394,36 @@ function Studio() {
   }, [manualCode, handleApplyManualMotion]);
 
   // ---------------------------------------------------------------------------
-  // 4. Playback Controls & Scrubber Slider Seeking
+  // 4. Player Controls: Play/Pause, Replay, Loop, YouTube-Style Realtime Scrubber
   // ---------------------------------------------------------------------------
   const togglePlayPause = () => {
-    if (!timelineRef.current) {
+    const activeTL = getActiveTimeline();
+    if (activeTL) {
+      // Task 2: Toggle state directly on the active GSAP instance
+      if (activeTL.paused()) {
+        activeTL.play();
+        setIsPlaying(true);
+      } else {
+        activeTL.pause();
+        setIsPlaying(false);
+      }
+    } else {
       if (manualCode && manualCode.trim()) {
         handleApplyManualMotion();
       } else {
-        const tl = buildLiveAnimation();
-        if (tl) {
-          tl.play();
-          setIsPlaying(true);
-        }
-      }
-      return;
-    }
-
-    if (isPlaying) {
-      timelineRef.current.pause();
-      setIsPlaying(false);
-    } else {
-      if (timelineRef.current.progress() === 1) {
-        if (manualCode && manualCode.trim()) {
-          handleApplyManualMotion();
-        } else {
-          timelineRef.current.restart();
-          setIsPlaying(true);
-        }
-      } else {
-        timelineRef.current.play();
-        setIsPlaying(true);
+        buildLiveAnimation();
       }
     }
   };
 
   const handleReset = () => {
-    if (manualCode && manualCode.trim()) {
-      handleApplyManualMotion();
-      return;
-    }
-
-    if (timelineRef.current) {
-      timelineRef.current.restart();
+    const activeTL = getActiveTimeline();
+    if (activeTL && typeof activeTL.restart === "function") {
+      // Task 4: Replay Button triggers activeTL.restart()
+      activeTL.restart();
       setIsPlaying(true);
+    } else if (manualCode && manualCode.trim()) {
+      handleApplyManualMotion();
     } else {
       const tl = buildLiveAnimation();
       if (tl) {
@@ -422,40 +433,48 @@ function Studio() {
     }
   };
 
-  // Scrubber Dragging Handlers
-  const handleScrubberStart = () => {
-    wasPlayingBeforeDrag.current = isPlaying;
-    setIsDraggingScrubber(true);
-    if (timelineRef.current) {
-      timelineRef.current.pause();
-    } else if (iframeRef.current?.contentWindow) {
-      const win = iframeRef.current.contentWindow as any;
-      if (win.gsap?.globalTimeline) win.gsap.globalTimeline.pause();
+  const toggleLooping = () => {
+    const nextLoop = !isLooping;
+    setIsLooping(nextLoop);
+    const activeTL = getActiveTimeline();
+    if (activeTL && typeof activeTL.repeat === "function") {
+      activeTL.repeat(nextLoop ? -1 : 0);
     }
+  };
+
+  // Task 3: YouTube-Style Realtime Scrubber (Seeker)
+  const handleScrubberStart = () => {
+    const activeTL = getActiveTimeline();
+    if (activeTL) {
+      wasPlayingBeforeDrag.current = !activeTL.paused();
+      activeTL.pause();
+    } else {
+      wasPlayingBeforeDrag.current = isPlaying;
+    }
+    setIsDraggingScrubber(true);
     setIsPlaying(false);
   };
 
   const handleScrubberChange = (val: number) => {
     setCurrentTime(val);
-    const win = iframeRef.current?.contentWindow as any;
-    const gsapObj = win?.gsap;
-
-    if (timelineRef.current) {
-      timelineRef.current.seek(val);
-    } else if (gsapObj && gsapObj.globalTimeline) {
-      gsapObj.globalTimeline.seek(val);
+    const activeTL = getActiveTimeline();
+    if (activeTL) {
+      const cleanDur = getCleanDuration(activeTL);
+      const normalizedProgress = Math.min(Math.max(val / cleanDur, 0), 1);
+      
+      if (typeof activeTL.progress === "function") {
+        activeTL.progress(normalizedProgress);
+      } else if (typeof activeTL.seek === "function") {
+        activeTL.seek(val);
+      }
     }
   };
 
   const handleScrubberEnd = () => {
     setIsDraggingScrubber(false);
-    if (wasPlayingBeforeDrag.current) {
-      if (timelineRef.current) {
-        timelineRef.current.play();
-      } else if (iframeRef.current?.contentWindow) {
-        const win = iframeRef.current.contentWindow as any;
-        if (win.gsap?.globalTimeline) win.gsap.globalTimeline.play();
-      }
+    const activeTL = getActiveTimeline();
+    if (wasPlayingBeforeDrag.current && activeTL) {
+      activeTL.play();
       setIsPlaying(true);
     }
   };
@@ -804,6 +823,7 @@ function Studio() {
           {/* Live GSAP Playback Controls & Real-Time Scrubber */}
           <div id="playback-control-bar" data-animate="true" className="glass flex h-14 shrink-0 items-center justify-between border-t border-border px-4">
             <div className="flex items-center gap-2">
+              {/* Play / Pause Toggle Button */}
               <button
                 id="playback-play-pause"
                 data-animate="true"
@@ -823,6 +843,7 @@ function Studio() {
                   </svg>
                 )}
               </button>
+              {/* Replay Button */}
               <button
                 id="playback-reset"
                 data-animate="true"
@@ -836,11 +857,12 @@ function Studio() {
                   <path d="M3 4v5h5" />
                 </svg>
               </button>
+              {/* Loop Toggle Button */}
               <button
                 id="playback-loop"
                 data-animate="true"
                 type="button"
-                onClick={() => setIsLooping(!isLooping)}
+                onClick={toggleLooping}
                 aria-label="Loop"
                 className={`flex h-9 w-9 items-center justify-center rounded-lg border transition-colors ${
                   isLooping 
@@ -875,7 +897,7 @@ function Studio() {
               />
             </div>
 
-            {/* Dynamic Time Counter Display */}
+            {/* Dynamic Time Counter Display (Finite Single-Iteration Duration) */}
             <span id="playback-time-counter" data-animate="true" className="rounded-lg border border-border bg-surface-2 px-3 py-1 font-mono text-[11.5px] tabular-nums text-muted-foreground">
               {currentTime.toFixed(1)}s / {duration.toFixed(1)}s
             </span>
