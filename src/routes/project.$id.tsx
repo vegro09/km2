@@ -91,11 +91,11 @@ function ProjectEditor() {
     isLoopingRef.current = isLooping;
   }, [isLooping]);
 
-  // Right Panel & Frame-Accurate Export States
+  // Right Panel & Frame-Accurate Export States (Defaults: 30 FPS and MP4 Format)
   const [spatialManifest, setSpatialManifest] = useState<Record<string, any>>({});
   const [copied, setCopied] = useState(false);
   const [framerate, setFramerate] = useState<30 | 60>(30);
-  const [exportFormat, setExportFormat] = useState<"mp4" | "webm" | "lottie">("webm");
+  const [exportFormat, setExportFormat] = useState<"mp4" | "webm" | "lottie">("mp4");
 
   const [isRendering, setIsRendering] = useState(false);
   const [currentRenderFrame, setCurrentRenderFrame] = useState(0);
@@ -171,42 +171,48 @@ function ProjectEditor() {
     return null;
   }, []);
 
-  // Task 1: Pure Single-Cycle Duration Extraction
+  // Task 1: Real Animation Duration Sanitizer (Never infinite or 1000000000s)
   const getCleanDuration = useCallback((tl: any): number => {
     if (!tl) return 2.0;
 
-    let dur = 2.0;
+    // Check if timeline duration is a valid finite number < 100,000s
     try {
       if (typeof tl.duration === "function") {
-        dur = tl.duration();
-      }
-    } catch {
-      dur = 2.0;
-    }
-
-    // Fallback if dur is Infinity, NaN, or <= 0: fallback to children end times
-    if (!isFinite(dur) || isNaN(dur) || dur <= 0) {
-      if (typeof tl.getChildren === "function") {
-        try {
-          const children = tl.getChildren(true, true, true);
-          const maxChildEnd = children.reduce((max: number, child: any) => {
-            const childEnd = typeof child.endTime === "function" ? child.endTime() : 0;
-            return Math.max(max, isFinite(childEnd) ? childEnd : 0);
-          }, 0);
-
-          if (maxChildEnd > 0 && isFinite(maxChildEnd)) {
-            dur = maxChildEnd;
-          }
-        } catch {
-          dur = 2.0;
+        const d = tl.duration();
+        if (isFinite(d) && !isNaN(d) && d > 0 && d < 100000) {
+          return d;
         }
       }
+    } catch {
+      // ignore
     }
 
-    if (!isFinite(dur) || isNaN(dur) || dur <= 0) {
-      dur = 2.0;
+    // Inspect child tweens/timelines to calculate real max end time
+    if (typeof tl.getChildren === "function") {
+      try {
+        const children = tl.getChildren(true, true, true);
+        if (children && children.length > 0) {
+          const maxChildEnd = children.reduce((max: number, child: any) => {
+            if (child === tl) return max;
+            let childEnd = 0;
+            if (typeof child.endTime === "function") {
+              childEnd = child.endTime();
+            } else if (typeof child.startTime === "function" && typeof child.duration === "function") {
+              childEnd = child.startTime() + child.duration();
+            }
+            return Math.max(max, isFinite(childEnd) && childEnd < 100000 ? childEnd : 0);
+          }, 0);
+
+          if (maxChildEnd > 0) {
+            return maxChildEnd;
+          }
+        }
+      } catch {
+        // ignore
+      }
     }
-    return dur;
+
+    return 2.0;
   }, []);
 
   // Live Canvas DOM Injection
@@ -356,7 +362,7 @@ function ProjectEditor() {
     return tl;
   }, [getCleanDuration]);
 
-  // Dynamic JS Script Injection Pipeline
+  // Dynamic JS Script Injection Pipeline with Sanitized Real-Time Counter
   const handleApplyManualMotion = useCallback(() => {
     if (!iframeRef.current) return;
     const iframeWin = iframeRef.current.contentWindow as any;
@@ -391,6 +397,12 @@ function ProjectEditor() {
         existingScript.remove();
       }
 
+      // Reset global timeline time baseline so time never accumulates to 21.5s
+      if (gsapObj.globalTimeline && typeof gsapObj.globalTimeline.time === "function") {
+        gsapObj.globalTimeline.clear();
+        gsapObj.globalTimeline.time(0);
+      }
+
       const runInIframeScope = iframeWin.Function('gsap', 'document', 'window', manualCode);
       runInIframeScope(gsapObj, iframeDoc, iframeWin);
 
@@ -401,12 +413,13 @@ function ProjectEditor() {
 
       if (gsapObj.globalTimeline) {
         const globalTL = gsapObj.globalTimeline;
-        const dur = getCleanDuration(globalTL);
-        setTotalDuration(dur);
+        const realDur = getCleanDuration(globalTL);
+        setTotalDuration(realDur);
 
         globalTL.eventCallback("onUpdate", () => {
-          const cur = globalTL.time();
-          const p = globalTL.progress();
+          const rawTime = globalTL.time();
+          const cur = realDur > 0 ? (rawTime % realDur) : rawTime;
+          const p = realDur > 0 ? (cur / realDur) : 0;
           setCurrentTime(cur);
           setScrubberProgress(p * 100);
         });
@@ -538,13 +551,13 @@ function ProjectEditor() {
   };
 
   // ---------------------------------------------------------------------------
-  // EXPORT ENGINE: Pure Single-Cycle Duration Matching
+  // EXPORT ENGINE: Pure Single-Cycle Duration Matching (MP4 / 30 FPS Defaults)
   // ---------------------------------------------------------------------------
   const handleRenderDownloadVideo = async () => {
     const activeTL = getActiveTimeline();
     if (!activeTL) return;
 
-    // Task 1: Disable all timeline looping during export sequence
+    // Disable all timeline looping during export sequence
     if (typeof activeTL.repeat === "function") {
       activeTL.repeat(0);
     }
@@ -552,11 +565,11 @@ function ProjectEditor() {
       activeTL.eventCallback("onComplete", null);
     }
 
-    // Extract exact single-cycle duration
+    // Extract exact real single-cycle duration
     const exactDuration = getCleanDuration(activeTL);
-    const selectedFPS = framerate;
+    const selectedFPS = framerate; // 30 FPS by default
 
-    // Task 2: Calculate exact total frames to export
+    // Calculate exact total frames to export
     const totalFrames = Math.max(1, Math.ceil(exactDuration * selectedFPS));
 
     setTotalDuration(exactDuration);
@@ -588,7 +601,13 @@ function ProjectEditor() {
       return;
     }
 
-    let mimeType = "video/webm;codecs=vp9";
+    let mimeType = "video/mp4";
+    if (typeof MediaRecorder !== "undefined" && !MediaRecorder.isTypeSupported(mimeType)) {
+      mimeType = "video/mp4;codecs=avc1.42E01E,mp4a.40.2";
+    }
+    if (typeof MediaRecorder !== "undefined" && !MediaRecorder.isTypeSupported(mimeType)) {
+      mimeType = "video/webm;codecs=vp9";
+    }
     if (typeof MediaRecorder !== "undefined" && !MediaRecorder.isTypeSupported(mimeType)) {
       mimeType = "video/webm;codecs=vp8";
     }
@@ -616,7 +635,8 @@ function ProjectEditor() {
 
         const titleSlug = projectTitle.toLowerCase().replace(/[^a-z0-9]/g, "_");
         const aspectSlug = aspectRatio.replace(":", "_");
-        a.download = `${titleSlug}_${aspectSlug}_${bgMode}.webm`;
+        const ext = exportFormat === "mp4" ? "mp4" : exportFormat;
+        a.download = `${titleSlug}_${aspectSlug}_${bgMode}.${ext}`;
 
         document.body.appendChild(a);
         a.click();
@@ -641,7 +661,7 @@ function ProjectEditor() {
         return;
       }
 
-      // Task 3: Single-Pass Frame Capture Loop
+      // Single-Pass Frame Capture Loop
       for (let frame = 0; frame < totalFrames; frame++) {
         const progress = totalFrames === 1 ? 0 : frame / (totalFrames - 1);
         activeTL.progress(progress);
@@ -727,7 +747,7 @@ function ProjectEditor() {
 
   return (
     <div id="studio-screen" data-animate="true" className="flex h-screen flex-col bg-background select-none">
-      {/* Task 2: Render Status Modal Overlay with Exact Metrics */}
+      {/* Render Status Modal Overlay with Exact Metrics */}
       {isRendering && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4">
           <div className="w-full max-w-sm rounded-2xl border border-border bg-surface p-6 shadow-2xl text-center">
@@ -795,7 +815,7 @@ function ProjectEditor() {
               rel="noreferrer"
               className="rounded-full border border-primary/40 bg-primary/10 px-3 py-1 text-[11px] font-medium text-primary hover:bg-primary/20"
             >
-              Latest WebM Rendered 🎬
+              Latest Rendered Video 🎬
             </a>
           )}
         </div>
@@ -1094,7 +1114,7 @@ function ProjectEditor() {
           </div>
         </main>
 
-        {/* RIGHT PANEL: Tabbed Inspector & Refactored Export Engine */}
+        {/* RIGHT PANEL: Tabbed Inspector & Export Engine */}
         <aside id="right-sidebar" data-animate="true" className="flex w-[360px] shrink-0 flex-col overflow-auto border-l border-border bg-surface">
           <section id="tabbed-inspector-section" data-animate="true" className="border-b border-border p-4">
             <div className="flex items-center gap-1 border-b border-border pb-2 mb-3">
@@ -1229,7 +1249,7 @@ function ProjectEditor() {
             )}
           </section>
 
-          {/* Export Settings & Background Controls */}
+          {/* Export Settings & Background Controls (Default: MP4 & 30 FPS) */}
           <section id="render-settings" data-animate="true" className="p-4">
             <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
               High-Fidelity Export Engine
@@ -1323,7 +1343,7 @@ function ProjectEditor() {
                 Export Format
               </p>
               <div className="grid grid-cols-3 gap-2">
-                {(["webm", "mp4", "lottie"] as const).map((fmt) => (
+                {(["mp4", "webm", "lottie"] as const).map((fmt) => (
                   <button
                     key={fmt}
                     id={`fmt-${fmt}`}
@@ -1361,7 +1381,7 @@ function ProjectEditor() {
                     <path d="m7 10 5 5 5-5" />
                     <path d="M5 21h14" />
                   </svg>
-                  Render &amp; Download {bgMode === "transparent" ? "Alpha WebM" : "Video"}
+                  Render &amp; Download {exportFormat.toUpperCase()}
                 </>
               )}
             </button>
