@@ -171,7 +171,7 @@ function ProjectEditor() {
     return null;
   }, []);
 
-  // Task 1: Strict Animation Duration Sanitizer
+  // Task 1: Pure Single-Cycle Duration Extraction
   const getCleanDuration = useCallback((tl: any): number => {
     if (!tl) return 2.0;
 
@@ -184,8 +184,8 @@ function ProjectEditor() {
       dur = 2.0;
     }
 
-    // Fallback if dur is Infinity, NaN, <= 0, or exceeds 30 seconds
-    if (!isFinite(dur) || isNaN(dur) || dur <= 0 || dur > 30) {
+    // Fallback if dur is Infinity, NaN, or <= 0: fallback to children end times
+    if (!isFinite(dur) || isNaN(dur) || dur <= 0) {
       if (typeof tl.getChildren === "function") {
         try {
           const children = tl.getChildren(true, true, true);
@@ -203,11 +203,10 @@ function ProjectEditor() {
       }
     }
 
-    // Enforce hard ceiling bounds: [0.5s, 30s]
     if (!isFinite(dur) || isNaN(dur) || dur <= 0) {
       dur = 2.0;
     }
-    return Math.min(Math.max(dur, 0.5), 30);
+    return dur;
   }, []);
 
   // Live Canvas DOM Injection
@@ -539,20 +538,28 @@ function ProjectEditor() {
   };
 
   // ---------------------------------------------------------------------------
-  // EXPORT ENGINE: Controlled Frame-by-Frame Render Pipeline
+  // EXPORT ENGINE: Pure Single-Cycle Duration Matching
   // ---------------------------------------------------------------------------
   const handleRenderDownloadVideo = async () => {
     const activeTL = getActiveTimeline();
     if (!activeTL) return;
 
-    // Task 1: Strict Animation Duration Sanitizer
-    const sanitizedDuration = getCleanDuration(activeTL);
+    // Task 1: Disable all timeline looping during export sequence
+    if (typeof activeTL.repeat === "function") {
+      activeTL.repeat(0);
+    }
+    if (typeof activeTL.eventCallback === "function") {
+      activeTL.eventCallback("onComplete", null);
+    }
+
+    // Extract exact single-cycle duration
+    const exactDuration = getCleanDuration(activeTL);
     const selectedFPS = framerate;
 
-    // Task 2: Accurate Frame Counter (Never infinity!)
-    const totalFrames = Math.max(1, Math.ceil(sanitizedDuration * selectedFPS));
+    // Task 2: Calculate exact total frames to export
+    const totalFrames = Math.max(1, Math.ceil(exactDuration * selectedFPS));
 
-    setTotalDuration(sanitizedDuration);
+    setTotalDuration(exactDuration);
     setTotalRenderFrames(totalFrames);
     setCurrentRenderFrame(0);
     setRenderProgress(0);
@@ -634,9 +641,9 @@ function ProjectEditor() {
         return;
       }
 
-      // Task 3: Controlled Render Loop strictly from frame = 0 to totalFrames - 1
+      // Task 3: Single-Pass Frame Capture Loop
       for (let frame = 0; frame < totalFrames; frame++) {
-        const progress = totalFrames > 1 ? frame / (totalFrames - 1) : 1;
+        const progress = totalFrames === 1 ? 0 : frame / (totalFrames - 1);
         activeTL.progress(progress);
 
         ctx.clearRect(0, 0, exportWidth, exportHeight);
@@ -720,7 +727,7 @@ function ProjectEditor() {
 
   return (
     <div id="studio-screen" data-animate="true" className="flex h-screen flex-col bg-background select-none">
-      {/* Task 2: Render Status Modal Overlay with Preview Metrics */}
+      {/* Task 2: Render Status Modal Overlay with Exact Metrics */}
       {isRendering && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4">
           <div className="w-full max-w-sm rounded-2xl border border-border bg-surface p-6 shadow-2xl text-center">
@@ -731,7 +738,7 @@ function ProjectEditor() {
             </div>
             <h3 className="text-base font-semibold text-foreground">Rendering Animation</h3>
             <p className="mt-1 font-mono text-[11.5px] text-muted-foreground">
-              Exporting: {totalDuration.toFixed(1)}s @ {framerate} FPS ({totalRenderFrames} total frames)
+              Rendering {totalDuration.toFixed(2)}s video ({totalRenderFrames} frames @ {framerate} FPS)
             </p>
 
             {/* Progress Bar */}
