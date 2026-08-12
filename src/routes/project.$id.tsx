@@ -98,6 +98,7 @@ function ProjectEditor() {
   const [exportFormat, setExportFormat] = useState<"mp4" | "webm" | "lottie">("mp4");
 
   const [isRendering, setIsRendering] = useState(false);
+  const [renderError, setRenderError] = useState<string | null>(null);
   const [currentRenderFrame, setCurrentRenderFrame] = useState(0);
   const [totalRenderFrames, setTotalRenderFrames] = useState(0);
   const [renderProgress, setRenderProgress] = useState(0);
@@ -171,11 +172,10 @@ function ProjectEditor() {
     return null;
   }, []);
 
-  // Task 1: Real Animation Duration Sanitizer (Never infinite or 1000000000s)
+  // Real Animation Duration Sanitizer
   const getCleanDuration = useCallback((tl: any): number => {
     if (!tl) return 2.0;
 
-    // Check if timeline duration is a valid finite number < 100,000s
     try {
       if (typeof tl.duration === "function") {
         const d = tl.duration();
@@ -187,7 +187,6 @@ function ProjectEditor() {
       // ignore
     }
 
-    // Inspect child tweens/timelines to calculate real max end time
     if (typeof tl.getChildren === "function") {
       try {
         const children = tl.getChildren(true, true, true);
@@ -362,7 +361,7 @@ function ProjectEditor() {
     return tl;
   }, [getCleanDuration]);
 
-  // Dynamic JS Script Injection Pipeline with Sanitized Real-Time Counter
+  // Dynamic JS Script Injection Pipeline
   const handleApplyManualMotion = useCallback(() => {
     if (!iframeRef.current) return;
     const iframeWin = iframeRef.current.contentWindow as any;
@@ -397,7 +396,6 @@ function ProjectEditor() {
         existingScript.remove();
       }
 
-      // Reset global timeline time baseline so time never accumulates to 21.5s
       if (gsapObj.globalTimeline && typeof gsapObj.globalTimeline.time === "function") {
         gsapObj.globalTimeline.clear();
         gsapObj.globalTimeline.time(0);
@@ -551,71 +549,73 @@ function ProjectEditor() {
   };
 
   // ---------------------------------------------------------------------------
-  // EXPORT ENGINE: Pure Single-Cycle Duration Matching (MP4 / 30 FPS Defaults)
+  // OVERHAULED VIDEO EXPORT ENGINE: Guaranteed Deterministic Frame-by-Frame Pipeline
   // ---------------------------------------------------------------------------
   const handleRenderDownloadVideo = async () => {
     const activeTL = getActiveTimeline();
-    if (!activeTL) return;
-
-    // Disable all timeline looping during export sequence
-    if (typeof activeTL.repeat === "function") {
-      activeTL.repeat(0);
-    }
-    if (typeof activeTL.eventCallback === "function") {
-      activeTL.eventCallback("onComplete", null);
-    }
-
-    // Extract exact real single-cycle duration
-    const exactDuration = getCleanDuration(activeTL);
-    const selectedFPS = framerate; // 30 FPS by default
-
-    // Calculate exact total frames to export
-    const totalFrames = Math.max(1, Math.ceil(exactDuration * selectedFPS));
-
-    setTotalDuration(exactDuration);
-    setTotalRenderFrames(totalFrames);
-    setCurrentRenderFrame(0);
-    setRenderProgress(0);
-    setIsRendering(true);
-
-    // Temporarily pause GSAP timeline
-    activeTL.pause();
-    setIsPlaying(false);
-
-    let exportWidth = 1920;
-    let exportHeight = 1080;
-    if (aspectRatio === "9:16") {
-      exportWidth = 1080;
-      exportHeight = 1920;
-    } else if (aspectRatio === "1:1") {
-      exportWidth = 1080;
-      exportHeight = 1080;
-    }
-
-    const canvas = document.createElement("canvas");
-    canvas.width = exportWidth;
-    canvas.height = exportHeight;
-    const ctx = canvas.getContext("2d", { alpha: true });
-    if (!ctx) {
-      setIsRendering(false);
+    if (!activeTL) {
+      alert("No active animation found to export.");
       return;
     }
 
-    let mimeType = "video/mp4";
-    if (typeof MediaRecorder !== "undefined" && !MediaRecorder.isTypeSupported(mimeType)) {
-      mimeType = "video/mp4;codecs=avc1.42E01E,mp4a.40.2";
-    }
-    if (typeof MediaRecorder !== "undefined" && !MediaRecorder.isTypeSupported(mimeType)) {
-      mimeType = "video/webm;codecs=vp9";
-    }
-    if (typeof MediaRecorder !== "undefined" && !MediaRecorder.isTypeSupported(mimeType)) {
-      mimeType = "video/webm;codecs=vp8";
-    }
-    if (typeof MediaRecorder !== "undefined" && !MediaRecorder.isTypeSupported(mimeType)) {
-      mimeType = "video/webm";
-    }
+    // 1. Task 1: Pause GSAP timeline & setup status modal
+    setIsRendering(true);
+    setRenderError(null);
+    setCurrentRenderFrame(0);
+    setRenderProgress(0);
+
+    const wasPausedBefore = activeTL.paused();
+    activeTL.pause();
+    setIsPlaying(false);
 
     try {
+      if (typeof activeTL.repeat === "function") {
+        activeTL.repeat(0);
+      }
+      if (typeof activeTL.eventCallback === "function") {
+        activeTL.eventCallback("onComplete", null);
+      }
+
+      // Calculate exact duration & frame bounds
+      const exactDuration = getCleanDuration(activeTL);
+      const selectedFPS = framerate;
+      const totalFrames = Math.max(1, Math.ceil(exactDuration * selectedFPS));
+
+      setTotalDuration(exactDuration);
+      setTotalRenderFrames(totalFrames);
+
+      let exportWidth = 1920;
+      let exportHeight = 1080;
+      if (aspectRatio === "9:16") {
+        exportWidth = 1080;
+        exportHeight = 1920;
+      } else if (aspectRatio === "1:1") {
+        exportWidth = 1080;
+        exportHeight = 1080;
+      }
+
+      const canvas = document.createElement("canvas");
+      canvas.width = exportWidth;
+      canvas.height = exportHeight;
+      const ctx = canvas.getContext("2d", { alpha: true });
+      if (!ctx) {
+        throw new Error("Could not initialize offscreen 2D canvas context.");
+      }
+
+      let mimeType = "video/mp4";
+      if (typeof MediaRecorder !== "undefined" && !MediaRecorder.isTypeSupported(mimeType)) {
+        mimeType = "video/mp4;codecs=avc1.42E01E,mp4a.40.2";
+      }
+      if (typeof MediaRecorder !== "undefined" && !MediaRecorder.isTypeSupported(mimeType)) {
+        mimeType = "video/webm;codecs=vp9";
+      }
+      if (typeof MediaRecorder !== "undefined" && !MediaRecorder.isTypeSupported(mimeType)) {
+        mimeType = "video/webm;codecs=vp8";
+      }
+      if (typeof MediaRecorder !== "undefined" && !MediaRecorder.isTypeSupported(mimeType)) {
+        mimeType = "video/webm";
+      }
+
       const stream = canvas.captureStream(0);
       const track = stream.getVideoTracks()[0] as any;
       const chunks: Blob[] = [];
@@ -627,44 +627,33 @@ function ProjectEditor() {
         }
       };
 
-      recorder.onstop = () => {
-        const blob = new Blob(chunks, { type: mimeType });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-
-        const titleSlug = projectTitle.toLowerCase().replace(/[^a-z0-9]/g, "_");
-        const aspectSlug = aspectRatio.replace(":", "_");
-        const ext = exportFormat === "mp4" ? "mp4" : exportFormat;
-        a.download = `${titleSlug}_${aspectSlug}_${bgMode}.${ext}`;
-
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-        setRenderedVideoUrl(url);
-
-        setIsRendering(false);
-
-        // Reset timeline back to live playback mode
-        activeTL.progress(0);
-        activeTL.play();
-        setIsPlaying(true);
-      };
+      const renderPromise = new Promise<Blob>((resolve, reject) => {
+        recorder.onstop = () => {
+          if (chunks.length === 0) {
+            reject(new Error("No video data frames were recorded."));
+          } else {
+            resolve(new Blob(chunks, { type: mimeType }));
+          }
+        };
+        recorder.onerror = (e: any) => {
+          reject(e.error || new Error("MediaRecorder stream capture error."));
+        };
+      });
 
       recorder.start();
 
       const iframeDoc = iframeRef.current?.contentDocument;
       if (!iframeDoc || !iframeDoc.documentElement) {
-        recorder.stop();
-        setIsRendering(false);
-        return;
+        throw new Error("Canvas viewport iframe document is not accessible.");
       }
 
-      // Single-Pass Frame Capture Loop
+      // 2. Task 2: Deterministic Sequential Frame Loop
       for (let frame = 0; frame < totalFrames; frame++) {
         const progress = totalFrames === 1 ? 0 : frame / (totalFrames - 1);
         activeTL.progress(progress);
+
+        // Wait for DOM layout & font styling to settle
+        await new Promise((r) => requestAnimationFrame(r));
 
         ctx.clearRect(0, 0, exportWidth, exportHeight);
 
@@ -699,34 +688,72 @@ function ProjectEditor() {
         const svgBlob = new Blob([svgMarkup], { type: "image/svg+xml;charset=utf-8" });
         const svgUrl = URL.createObjectURL(svgBlob);
 
-        await new Promise<void>((resolve) => {
+        await new Promise<void>((resolveImg) => {
+          let timeoutId = setTimeout(() => {
+            URL.revokeObjectURL(svgUrl);
+            resolveImg();
+          }, 500);
+
           img.onload = () => {
+            clearTimeout(timeoutId);
             ctx.drawImage(img, 0, 0, exportWidth, exportHeight);
             URL.revokeObjectURL(svgUrl);
-            resolve();
+            resolveImg();
           };
           img.onerror = () => {
+            clearTimeout(timeoutId);
             URL.revokeObjectURL(svgUrl);
-            resolve();
+            resolveImg();
           };
           img.src = svgUrl;
         });
 
-        if (track && track.requestFrame) {
+        if (track && typeof track.requestFrame === "function") {
           track.requestFrame();
         }
 
-        setCurrentRenderFrame(frame + 1);
-        setRenderProgress(Math.round(((frame + 1) / totalFrames) * 100));
+        const frameNum = frame + 1;
+        const pct = Math.round((frameNum / totalFrames) * 100);
+        setCurrentRenderFrame(frameNum);
+        setRenderProgress(pct);
 
-        await new Promise((r) => setTimeout(r, 12));
+        // Yield for UI modal progress update
+        await new Promise((r) => setTimeout(r, 16));
       }
 
       recorder.stop();
+
+      // 3. Task 3: Guaranteed File Download Mechanism
+      const videoBlob = await renderPromise;
+      const downloadUrl = URL.createObjectURL(videoBlob);
+
+      const titleSlug = projectTitle.trim().replace(/\s+/g, "_") || "kanto_motion";
+      const ext = exportFormat === "mp4" ? "mp4" : exportFormat;
+      const fileName = `${titleSlug}_${selectedFPS}fps.${ext}`;
+
+      const a = document.createElement("a");
+      a.href = downloadUrl;
+      a.download = fileName;
+      a.style.display = "none";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+
+      setTimeout(() => URL.revokeObjectURL(downloadUrl), 10000);
+      setRenderedVideoUrl(downloadUrl);
+
     } catch (err: any) {
-      console.error("Frame-accurate render error:", err);
+      console.error("Export Failed:", err);
+      const errorMsg = err.message || "Unknown error during frame-by-frame rendering.";
+      setRenderError(errorMsg);
+    } finally {
+      // 4. Task 4: Always restore GSAP playback & close modal
       setIsRendering(false);
-      alert("Render error: " + err.message);
+      activeTL.progress(0);
+      if (!wasPausedBefore) {
+        activeTL.play();
+        setIsPlaying(true);
+      }
     }
   };
 
@@ -747,7 +774,7 @@ function ProjectEditor() {
 
   return (
     <div id="studio-screen" data-animate="true" className="flex h-screen flex-col bg-background select-none">
-      {/* Render Status Modal Overlay with Exact Metrics */}
+      {/* Task 4: Render Status Modal Overlay with Explicit Metrics */}
       {isRendering && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4">
           <div className="w-full max-w-sm rounded-2xl border border-border bg-surface p-6 shadow-2xl text-center">
@@ -756,9 +783,9 @@ function ProjectEditor() {
                 <span className="h-7 w-7 animate-spin rounded-full border-2 border-primary border-t-transparent" />
               </div>
             </div>
-            <h3 className="text-base font-semibold text-foreground">Rendering Animation</h3>
+            <h3 className="text-base font-semibold text-foreground">Rendering Video</h3>
             <p className="mt-1 font-mono text-[11.5px] text-muted-foreground">
-              Rendering {totalDuration.toFixed(2)}s video ({totalRenderFrames} frames @ {framerate} FPS)
+              Rendering Frame {currentRenderFrame} / {totalRenderFrames} ({renderProgress}%)
             </p>
 
             {/* Progress Bar */}
@@ -770,10 +797,32 @@ function ProjectEditor() {
             </div>
 
             <div className="mt-3 flex items-center justify-between font-mono text-[11px] text-muted-foreground">
-              <span>Frame {currentRenderFrame} / {totalRenderFrames}</span>
+              <span>{totalDuration.toFixed(2)}s @ {framerate} FPS</span>
               <span className="text-primary font-semibold">{renderProgress}%</span>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Task 4: Error Toast Notification */}
+      {renderError && (
+        <div className="fixed bottom-6 right-6 z-50 flex items-center gap-3 rounded-xl border border-red-500/50 bg-red-950/90 px-4 py-3 text-red-200 shadow-2xl backdrop-blur-md animate-in slide-in-from-bottom-2">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0 text-red-400">
+            <circle cx="12" cy="12" r="10" />
+            <line x1="12" y1="8" x2="12" y2="12" />
+            <line x1="12" y1="16" x2="12.01" y2="16" />
+          </svg>
+          <div className="text-[12px] font-medium">
+            <p className="font-semibold text-red-300">Export Failed</p>
+            <p className="text-[11px] text-red-300/80">{renderError}</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => setRenderError(null)}
+            className="ml-2 text-red-400 hover:text-white font-bold text-sm"
+          >
+            ✕
+          </button>
         </div>
       )}
 
