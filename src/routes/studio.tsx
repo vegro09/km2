@@ -1,4 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { useState, useEffect, useRef, useCallback } from "react";
+import gsap from "gsap";
 
 export const Route = createFileRoute("/studio")({
   head: () => ({
@@ -7,7 +9,7 @@ export const Route = createFileRoute("/studio")({
       {
         name: "description",
         content:
-          "Three-panel motion workspace: code and DOM tree, live canvas viewport, AI motion director with spatial manifest and video render settings.",
+          "Three-panel motion workspace: code editor, live canvas viewport with GSAP animation engine, spatial manifest inspector, and video export.",
       },
       { property: "og:title", content: "Motion Studio Editor — Kanto Motion" },
       {
@@ -21,38 +23,367 @@ export const Route = createFileRoute("/studio")({
   component: Studio,
 });
 
-const codeLines: Array<Array<[string, string]>> = [
-  [["tag", "<div"], ["key", " id="], ["str", '"streak-card"'], ["tag", ">"]],
-  [["tag", "  <div"], ["key", " id="], ["str", '"streak-icon"'], ["tag", ">🔥</div>"]],
-  [["tag", "  <h3"], ["key", " id="], ["str", '"streak-title"'], ["tag", ">7 Day Streak</h3>"]],
-  [["tag", "  <p"], ["key", " id="], ["str", '"streak-caption"'], ["tag", ">Keep it going</p>"]],
-  [["tag", "</div>"]],
-  [["com", ""]],
-  [["com", "/* styles */"]],
-  [["key", "#streak-card"], ["tag", " {"]],
-  [["key", "  display"], ["tag", ": "], ["str", "flex"], ["tag", ";"]],
-  [["key", "  border-radius"], ["tag", ": "], ["str", "16px"], ["tag", ";"]],
-  [["key", "  background"], ["tag", ": "], ["str", "#09090b"], ["tag", ";"]],
-  [["tag", "}"]],
-];
+const DEFAULT_HTML = `<div id="streak-card" data-animate="true" class="card">
+  <div id="streak-icon" data-animate="true" class="icon">🔥</div>
+  <div class="content">
+    <h3 id="streak-title" data-animate="true" class="title">7 Day Streak</h3>
+    <p id="streak-caption" data-animate="true" class="caption">Keep it going</p>
+  </div>
+</div>`;
 
-const codeColor: Record<string, string> = {
-  tag: "text-code-tag",
-  key: "text-code-key",
-  str: "text-code-str",
-  com: "text-code-com",
-};
+const DEFAULT_CSS = `/* Base Canvas Styles */
+.card {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 24px 32px;
+  background: #111115;
+  border: 1px solid #27272a;
+  border-radius: 16px;
+  color: #ffffff;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+  font-family: system-ui, -apple-system, sans-serif;
+}
+.icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 56px;
+  height: 56px;
+  background: #1e1e24;
+  border: 1px solid #3f3f46;
+  border-radius: 12px;
+  font-size: 28px;
+}
+.content {
+  display: flex;
+  flex-direction: column;
+}
+.title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: #f4f4f5;
+}
+.caption {
+  margin: 4px 0 0 0;
+  font-size: 13px;
+  color: #a1a1aa;
+}`;
 
-const domElements = [
-  { id: "#streak-card", tag: "div", depth: 0 },
-  { id: "#streak-icon", tag: "div", depth: 1 },
-  { id: "#streak-title", tag: "h3", depth: 1 },
-  { id: "#streak-caption", tag: "p", depth: 1 },
-];
+const DEFAULT_PROMPT = "Make the streak icon float up slightly with a gentle bounce, then scale the streak title.";
 
 function Studio() {
+  // Left Panel States
+  const [activeLeftTab, setActiveLeftTab] = useState<"code" | "dom">("code");
+  const [activeCodeTab, setActiveCodeTab] = useState<"html" | "css">("html");
+  const [htmlCode, setHtmlCode] = useState(DEFAULT_HTML);
+  const [cssCode, setCssCode] = useState(DEFAULT_CSS);
+
+  // AI Prompt & Manual GSAP Code
+  const [motionPrompt, setMotionPrompt] = useState(DEFAULT_PROMPT);
+  const [manualCode, setManualCode] = useState("gsap.to('#streak-icon', { y: -20, scale: 1.2, duration: 0.8, ease: 'back.out(1.7)' });");
+
+  // Center Canvas & Animation States
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const timelineRef = useRef<gsap.core.Timeline | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(2.0);
+  const [isLooping, setIsLooping] = useState(false);
+
+  // Right Panel & Export States
+  const [spatialManifest, setSpatialManifest] = useState<Record<string, any>>({});
+  const [copied, setCopied] = useState(false);
+  const [framerate, setFramerate] = useState<30 | 60>(30);
+  const [exportFormat, setExportFormat] = useState<"mp4" | "webm" | "lottie">("mp4");
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [isRendering, setIsRendering] = useState(false);
+  const [renderedVideoUrl, setRenderedVideoUrl] = useState<string | null>(null);
+
+  // ---------------------------------------------------------------------------
+  // 1. Live Canvas DOM Injection & Spatial Manifest Extraction
+  // ---------------------------------------------------------------------------
+  const updateCanvasAndSpatial = useCallback(() => {
+    if (!iframeRef.current) return;
+    const iframeDoc = iframeRef.current.contentDocument || iframeRef.current.contentWindow?.document;
+    if (!iframeDoc) return;
+
+    const fullDoc = `
+      <!DOCTYPE html>
+      <html>
+        <head>
+          <style>
+            body {
+              margin: 0;
+              padding: 0;
+              background: transparent;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              min-height: 100vh;
+              overflow: hidden;
+            }
+            ${cssCode}
+          </style>
+          <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+        </head>
+        <body>
+          ${htmlCode}
+        </body>
+      </html>
+    `;
+
+    iframeDoc.open();
+    iframeDoc.write(fullDoc);
+    iframeDoc.close();
+
+    // Recalculate spatial coordinates once loaded
+    setTimeout(() => {
+      if (!iframeDoc.body) return;
+      const targets = Array.from(iframeDoc.querySelectorAll('[id], [data-animate="true"]'));
+      const manifest: Record<string, any> = {};
+
+      targets.forEach((el) => {
+        const id = el.id ? `#${el.id}` : `[data-animate="${el.getAttribute('data-animate')}"]`;
+        const rect = el.getBoundingClientRect();
+        manifest[id] = {
+          x: Math.round(rect.x),
+          y: Math.round(rect.y),
+          w: Math.round(rect.width),
+          h: Math.round(rect.height)
+        };
+      });
+
+      setSpatialManifest(manifest);
+    }, 150);
+  }, [htmlCode, cssCode]);
+
+  useEffect(() => {
+    updateCanvasAndSpatial();
+  }, [updateCanvasAndSpatial]);
+
+  // ---------------------------------------------------------------------------
+  // 2. Client-Side Live GSAP Animation Preview
+  // ---------------------------------------------------------------------------
+  const buildLiveAnimation = useCallback((keyframeSequence?: any[]) => {
+    if (!iframeRef.current) return;
+    const iframeWin = iframeRef.current.contentWindow as any;
+    const iframeDoc = iframeRef.current.contentDocument;
+    if (!iframeWin || !iframeDoc) return;
+
+    const gsapObj = iframeWin.gsap || gsap;
+
+    // Reset previous timeline
+    if (timelineRef.current) {
+      timelineRef.current.kill();
+    }
+
+    const tl = gsapObj.timeline({
+      paused: true,
+      repeat: isLooping ? -1 : 0,
+      onUpdate: () => {
+        setCurrentTime(tl.time());
+      },
+      onComplete: () => {
+        if (!isLooping) setIsPlaying(false);
+      }
+    });
+
+    if (keyframeSequence && Array.isArray(keyframeSequence) && keyframeSequence.length > 0) {
+      keyframeSequence.forEach((elemMotion: any) => {
+        const target = iframeDoc.getElementById(elemMotion.element_id) || 
+                       iframeDoc.querySelector(`[data-animate="${elemMotion.element_id}"]`);
+        if (!target) return;
+
+        elemMotion.keyframes.forEach((kf: any) => {
+          const timeSec = kf.time_ms / 1000;
+          tl.to(target, {
+            x: kf.delta_x,
+            y: kf.delta_y,
+            scale: kf.scale,
+            opacity: kf.opacity,
+            ease: kf.easing || "power1.out",
+            duration: 0.4
+          }, timeSec);
+        });
+      });
+    } else {
+      // Fallback default client-side animation preview
+      const icon = iframeDoc.getElementById("streak-icon");
+      const title = iframeDoc.getElementById("streak-title");
+
+      if (icon) {
+        tl.to(icon, { y: -24, scale: 1.25, duration: 0.6, ease: "back.out(1.7)" }, 0);
+        tl.to(icon, { y: 0, scale: 1.0, duration: 0.5, ease: "power2.inOut" }, 0.8);
+      }
+      if (title) {
+        tl.to(title, { scale: 1.08, color: "#3b82f6", duration: 0.4, ease: "power1.out" }, 0.3);
+        tl.to(title, { scale: 1.0, color: "#f4f4f5", duration: 0.4, ease: "power1.in" }, 0.9);
+      }
+    }
+
+    setDuration(tl.duration() || 2.0);
+    timelineRef.current = tl;
+    return tl;
+  }, [isLooping]);
+
+  // Handle Play/Pause
+  const togglePlayPause = () => {
+    if (!timelineRef.current) {
+      const tl = buildLiveAnimation();
+      if (tl) {
+        tl.play();
+        setIsPlaying(true);
+      }
+      return;
+    }
+
+    if (isPlaying) {
+      timelineRef.current.pause();
+      setIsPlaying(false);
+    } else {
+      if (timelineRef.current.progress() === 1) {
+        timelineRef.current.restart();
+      } else {
+        timelineRef.current.play();
+      }
+      setIsPlaying(true);
+    }
+  };
+
+  // Handle Reset / Replay
+  const handleReset = () => {
+    if (timelineRef.current) {
+      timelineRef.current.restart();
+      setIsPlaying(true);
+    } else {
+      const tl = buildLiveAnimation();
+      if (tl) {
+        tl.restart();
+        setIsPlaying(true);
+      }
+    }
+  };
+
+  // Handle Scrubber Change
+  const handleScrubberChange = (val: number) => {
+    setCurrentTime(val);
+    if (timelineRef.current) {
+      timelineRef.current.pause();
+      timelineRef.current.time(val);
+      setIsPlaying(false);
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // 3. Generate Motion Code Button (Triggers Live Preview Animation)
+  // ---------------------------------------------------------------------------
+  const handleGenerateMotionCode = async () => {
+    setIsGenerating(true);
+    try {
+      // Re-initialize canvas to clean state
+      updateCanvasAndSpatial();
+
+      // Call Motion Engine API for Motion Plan
+      const res = await fetch("http://localhost:3001/api/generate-motion", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          html: htmlCode,
+          css: cssCode,
+          prompt: motionPrompt,
+          manualCode: manualCode
+        })
+      });
+
+      const data = await res.json();
+      if (data.success && data.motionPlan) {
+        const keyframes = data.motionPlan.elements_motion;
+        const tl = buildLiveAnimation(keyframes);
+        if (tl) {
+          tl.play();
+          setIsPlaying(true);
+        }
+      } else {
+        // Fallback live animation preview if server unavailable
+        const tl = buildLiveAnimation();
+        if (tl) {
+          tl.play();
+          setIsPlaying(true);
+        }
+      }
+    } catch {
+      // Fallback client-side GSAP preview if backend fetch fails
+      const tl = buildLiveAnimation();
+      if (tl) {
+        tl.play();
+        setIsPlaying(true);
+      }
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // 4. Render & Download Video Button (Triggers Puppeteer/FFmpeg Pipeline)
+  // ---------------------------------------------------------------------------
+  const handleRenderDownloadVideo = async () => {
+    setIsRendering(true);
+    try {
+      const res = await fetch("http://localhost:3001/api/generate-motion", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          html: htmlCode,
+          css: cssCode,
+          prompt: motionPrompt,
+          manualCode: manualCode
+        })
+      });
+
+      const data = await res.json();
+      if (data.success && data.videoUrl) {
+        const fullUrl = `http://localhost:3001${data.videoUrl}`;
+        setRenderedVideoUrl(fullUrl);
+
+        // Trigger file download
+        const a = document.createElement("a");
+        a.href = fullUrl;
+        a.download = `kanto_motion_${Date.now()}.mp4`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      } else {
+        alert("Render failed: " + (data.error || "Unknown server error"));
+      }
+    } catch (err: any) {
+      alert("Render request error: " + err.message);
+    } finally {
+      setIsRendering(false);
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // 5. Copy JSON Handler
+  // ---------------------------------------------------------------------------
+  const handleCopyJSON = () => {
+    const jsonStr = JSON.stringify(spatialManifest, null, 2);
+    navigator.clipboard.writeText(jsonStr);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
+
+  // Extract DOM element list for left panel inspector
+  const parsedDomElements = Object.keys(spatialManifest).map((key) => ({
+    id: key,
+    tag: key.startsWith("#") ? "elem" : "div",
+    depth: key === "#streak-card" ? 0 : 1
+  }));
+
   return (
-    <div id="studio-screen" data-animate="true" className="flex h-screen flex-col bg-background">
+    <div id="studio-screen" data-animate="true" className="flex h-screen flex-col bg-background select-none">
+      {/* Top Header */}
       <header id="studio-topbar" data-animate="true" className="glass flex h-14 shrink-0 items-center justify-between border-b border-border px-4">
         <div className="flex items-center gap-3">
           <Link id="studio-brand" data-animate="true" to="/dashboard" className="flex items-center gap-2.5">
@@ -63,12 +394,22 @@ function Studio() {
           </Link>
           <span className="h-5 w-px bg-border" />
           <span id="studio-project-name" data-animate="true" className="text-[13px] text-muted-foreground">
-            Daily Streak Widget
+            Daily Streak Widget Editor
           </span>
         </div>
         <div className="flex items-center gap-2">
+          {renderedVideoUrl && (
+            <a
+              href={renderedVideoUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="rounded-full border border-primary/40 bg-primary/10 px-3 py-1 text-[11px] font-medium text-primary hover:bg-primary/20"
+            >
+              Latest Video Rendered 🎬
+            </a>
+          )}
           <span id="studio-save-state" data-animate="true" className="rounded-full border border-border bg-surface-2 px-3 py-1 text-[11px] text-muted-foreground">
-            All changes saved
+            Live Preview Active
           </span>
           <span id="studio-avatar" data-animate="true" className="flex h-7 w-7 items-center justify-center rounded-full border border-border bg-surface-2 text-[11px]">
             VG
@@ -77,56 +418,127 @@ function Studio() {
       </header>
 
       <div className="flex min-h-0 flex-1">
-        {/* LEFT */}
-        <aside id="left-sidebar" data-animate="true" className="flex w-[320px] shrink-0 flex-col border-r border-border bg-surface">
+        {/* LEFT PANEL: Interactive Code Editor */}
+        <aside id="left-sidebar" data-animate="true" className="flex w-[340px] shrink-0 flex-col border-r border-border bg-surface">
           <div id="left-tab-switcher" data-animate="true" className="flex gap-1 border-b border-border p-2">
-            <button id="tab-code-editor" data-animate="true" type="button" className="h-8 flex-1 rounded-lg bg-primary text-[12px] font-medium text-primary-foreground">
-              HTML / CSS Code
+            <button
+              id="tab-code-editor"
+              data-animate="true"
+              type="button"
+              onClick={() => setActiveLeftTab("code")}
+              className={`h-8 flex-1 rounded-lg text-[12px] font-medium transition-colors ${
+                activeLeftTab === "code"
+                  ? "bg-primary text-primary-foreground"
+                  : "border border-border bg-surface-2 text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              Code Editor
             </button>
-            <button id="tab-dom-tree" data-animate="true" type="button" className="h-8 flex-1 rounded-lg border border-border bg-surface-2 text-[12px] text-muted-foreground">
-              DOM Elements
+            <button
+              id="tab-dom-tree"
+              data-animate="true"
+              type="button"
+              onClick={() => setActiveLeftTab("dom")}
+              className={`h-8 flex-1 rounded-lg text-[12px] font-medium transition-colors ${
+                activeLeftTab === "dom"
+                  ? "bg-primary text-primary-foreground"
+                  : "border border-border bg-surface-2 text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              DOM Elements ({parsedDomElements.length})
             </button>
           </div>
 
-          <div id="code-editor-panel" data-animate="true" className="min-h-0 flex-1 overflow-auto p-3">
-            <div className="rounded-xl border border-border bg-background p-3 font-mono text-[11.5px] leading-6">
-              {codeLines.map((line, i) => (
-                <div key={i} className="flex gap-3">
-                  <span className="w-5 shrink-0 select-none text-right text-code-com">{i + 1}</span>
-                  <span className="whitespace-pre">
-                    {line.map(([t, v], j) => (
-                      <span key={j} className={codeColor[t]}>
-                        {v}
-                      </span>
-                    ))}
-                  </span>
+          {activeLeftTab === "code" ? (
+            <div className="flex min-h-0 flex-1 flex-col p-3">
+              {/* Code Editor Sub-Tabs (HTML vs CSS) */}
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setActiveCodeTab("html")}
+                    className={`px-3 py-1 text-[11px] font-mono rounded-md transition-colors ${
+                      activeCodeTab === "html"
+                        ? "bg-primary/20 text-primary border border-primary/30"
+                        : "bg-surface-2 text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    HTML
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveCodeTab("css")}
+                    className={`px-3 py-1 text-[11px] font-mono rounded-md transition-colors ${
+                      activeCodeTab === "css"
+                        ? "bg-primary/20 text-primary border border-primary/30"
+                        : "bg-surface-2 text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    CSS
+                  </button>
                 </div>
-              ))}
-            </div>
-          </div>
+                <span className="text-[10px] text-muted-foreground uppercase tracking-wider">
+                  Live Editing
+                </span>
+              </div>
 
-          <div id="element-inspector" data-animate="true" className="border-t border-border p-3">
+              {/* Editable Textarea */}
+              <div className="relative flex-1 min-h-0 rounded-xl border border-border bg-background">
+                {activeCodeTab === "html" ? (
+                  <textarea
+                    id="html-code-input"
+                    value={htmlCode}
+                    onChange={(e) => setHtmlCode(e.target.value)}
+                    placeholder="Enter HTML markup here..."
+                    className="h-full w-full resize-none border-0 bg-transparent p-3 font-mono text-[12px] leading-5 text-foreground focus:outline-none focus:ring-1 focus:ring-primary rounded-xl"
+                  />
+                ) : (
+                  <textarea
+                    id="css-code-input"
+                    value={cssCode}
+                    onChange={(e) => setCssCode(e.target.value)}
+                    placeholder="Enter CSS styles here..."
+                    className="h-full w-full resize-none border-0 bg-transparent p-3 font-mono text-[12px] leading-5 text-foreground focus:outline-none focus:ring-1 focus:ring-primary rounded-xl"
+                  />
+                )}
+              </div>
+            </div>
+          ) : (
+            <div id="element-inspector" data-animate="true" className="min-h-0 flex-1 overflow-auto p-3">
+              <p className="px-1 text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
+                Target Elements
+              </p>
+              <ul className="mt-2 space-y-1.5">
+                {parsedDomElements.map((el) => (
+                  <li
+                    key={el.id}
+                    className="flex items-center justify-between rounded-lg border border-border bg-surface-2 px-3 py-2"
+                    style={{ marginLeft: el.depth * 12 }}
+                  >
+                    <span className="font-mono text-[11.5px] text-primary">{el.id}</span>
+                    <span className="font-mono text-[10.5px] text-muted-foreground">&lt;{el.tag}&gt;</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Manual GSAP Code Override Input */}
+          <div className="border-t border-border p-3">
             <p className="px-1 text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-              Element Inspector
+              Manual GSAP Override (Optional)
             </p>
-            <ul className="mt-2 space-y-1">
-              {domElements.map((el) => (
-                <li
-                  key={el.id}
-                  id={`inspector-item-${el.id.slice(1)}`}
-                  data-animate="true"
-                  className="flex items-center justify-between rounded-lg border border-border bg-surface-2 px-3 py-2"
-                  style={{ marginLeft: el.depth * 12 }}
-                >
-                  <span className="font-mono text-[11.5px]">{el.id}</span>
-                  <span className="font-mono text-[10.5px] text-muted-foreground">&lt;{el.tag}&gt;</span>
-                </li>
-              ))}
-            </ul>
+            <input
+              type="text"
+              value={manualCode}
+              onChange={(e) => setManualCode(e.target.value)}
+              placeholder="e.g. gsap.to('#streak-icon', { y: -30 });"
+              className="mt-2 w-full rounded-lg border border-border bg-background px-3 py-2 font-mono text-[11.5px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+            />
           </div>
         </aside>
 
-        {/* CENTER */}
+        {/* CENTER PANEL: Live DOM Canvas Viewport */}
         <main id="canvas-panel" data-animate="true" className="flex min-w-0 flex-1 flex-col bg-background">
           <div id="canvas-toolbar" data-animate="true" className="flex h-12 items-center justify-between border-b border-border px-4">
             <div className="flex gap-1">
@@ -147,8 +559,11 @@ function Studio() {
               ))}
             </div>
             <div className="flex items-center gap-2">
+              <span className="rounded-lg border border-primary/30 bg-primary/10 px-2.5 py-0.5 text-[11px] font-medium text-primary">
+                Live DOM Preview
+              </span>
               <span id="canvas-zoom" data-animate="true" className="rounded-lg border border-border bg-surface-2 px-3 py-1 text-[11.5px] text-muted-foreground">
-                Zoom 100%
+                100%
               </span>
               <span id="canvas-resolution" data-animate="true" className="rounded-lg border border-border bg-surface-2 px-3 py-1 text-[11.5px] text-muted-foreground">
                 1920 × 1080
@@ -156,57 +571,52 @@ function Studio() {
             </div>
           </div>
 
+          {/* Live DOM Preview Container (Iframe Canvas) */}
           <div className="grid-bg flex min-h-0 flex-1 items-center justify-center overflow-auto p-8">
             <div
               id="canvas-stage"
               data-animate="true"
-              className="flex aspect-video w-full max-w-[860px] items-center justify-center rounded-2xl border border-border bg-background"
+              className="flex aspect-video w-full max-w-[860px] items-center justify-center rounded-2xl border border-border bg-background shadow-2xl overflow-hidden"
             >
-              <div
-                id="streak-card"
-                data-animate="true"
-                className="flex items-center gap-4 rounded-2xl border border-border bg-surface p-6"
-              >
-                <span
-                  id="streak-icon"
-                  data-animate="true"
-                  className="flex h-14 w-14 items-center justify-center rounded-xl border border-border bg-surface-2 text-2xl"
-                >
-                  🔥
-                </span>
-                <div>
-                  <h3 id="streak-title" data-animate="true" className="text-lg font-semibold">
-                    7 Day Streak
-                  </h3>
-                  <p id="streak-caption" data-animate="true" className="mt-1 text-[13px] text-muted-foreground">
-                    Keep it going
-                  </p>
-                </div>
-              </div>
+              <iframe
+                ref={iframeRef}
+                title="Live DOM Canvas"
+                className="w-full h-full border-0 bg-transparent"
+              />
             </div>
           </div>
 
+          {/* Live GSAP Playback Controls */}
           <div id="playback-control-bar" data-animate="true" className="glass flex h-14 shrink-0 items-center justify-between border-t border-border px-4">
             <div className="flex items-center gap-2">
               <button
                 id="playback-play-pause"
                 data-animate="true"
                 type="button"
+                onClick={togglePlayPause}
                 aria-label="Play / Pause"
-                className="flex h-10 w-10 items-center justify-center rounded-full bg-primary text-primary-foreground"
+                className="flex h-10 w-10 items-center justify-center rounded-full bg-primary text-primary-foreground hover:opacity-90 transition-opacity"
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-                  <path d="M8 5v14l11-7z" />
-                </svg>
+                {isPlaying ? (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                    <rect x="6" y="4" width="4" height="16" />
+                    <rect x="14" y="4" width="4" height="16" />
+                  </svg>
+                ) : (
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M8 5v14l11-7z" />
+                  </svg>
+                )}
               </button>
               <button
                 id="playback-reset"
                 data-animate="true"
                 type="button"
+                onClick={handleReset}
                 aria-label="Reset / Replay"
-                className="flex h-9 w-9 items-center justify-center rounded-lg border border-border bg-surface-2 text-muted-foreground"
+                className="flex h-9 w-9 items-center justify-center rounded-lg border border-border bg-surface-2 text-muted-foreground hover:text-foreground transition-colors"
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M3 12a9 9 0 1 0 3-6.7" />
                   <path d="M3 4v5h5" />
                 </svg>
@@ -215,10 +625,15 @@ function Studio() {
                 id="playback-loop"
                 data-animate="true"
                 type="button"
+                onClick={() => setIsLooping(!isLooping)}
                 aria-label="Loop"
-                className="flex h-9 w-9 items-center justify-center rounded-lg border border-border bg-surface-2 text-muted-foreground"
+                className={`flex h-9 w-9 items-center justify-center rounded-lg border transition-colors ${
+                  isLooping 
+                    ? "border-primary bg-primary/20 text-primary" 
+                    : "border-border bg-surface-2 text-muted-foreground hover:text-foreground"
+                }`}
               >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="m17 2 4 4-4 4" />
                   <path d="M3 11v-1a4 4 0 0 1 4-4h14" />
                   <path d="m7 22-4-4 4-4" />
@@ -226,174 +641,186 @@ function Studio() {
                 </svg>
               </button>
             </div>
+
+            {/* Timeline Scrubber Input */}
+            <div className="flex items-center gap-3 flex-1 max-w-xs mx-4">
+              <input
+                type="range"
+                min={0}
+                max={duration}
+                step={0.01}
+                value={currentTime}
+                onChange={(e) => handleScrubberChange(parseFloat(e.target.value))}
+                className="w-full accent-primary h-1.5 bg-surface-2 rounded-lg cursor-pointer"
+              />
+            </div>
+
             <span id="playback-time-counter" data-animate="true" className="rounded-lg border border-border bg-surface-2 px-3 py-1 font-mono text-[11.5px] tabular-nums text-muted-foreground">
-              02.4s / 05.0s
+              {currentTime.toFixed(1)}s / {duration.toFixed(1)}s
             </span>
           </div>
         </main>
 
-        {/* RIGHT */}
+        {/* RIGHT PANEL: Spatial Inspector & Video Export */}
         <aside id="right-sidebar" data-animate="true" className="flex w-[360px] shrink-0 flex-col overflow-auto border-l border-border bg-surface">
+          {/* AI Motion Director Prompt Section */}
           <section id="ai-motion-prompt" data-animate="true" className="border-b border-border p-4">
             <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">AI Motion Director</p>
             <textarea
               id="motion-prompt-input"
               data-animate="true"
-              rows={5}
-              defaultValue="Make the streak icon float up slightly with a gentle bounce, then fade the caption in."
-              className="mt-3 w-full resize-none rounded-xl border border-border bg-background p-3 font-mono text-[12px] leading-5 text-foreground placeholder:text-muted-foreground"
+              rows={4}
+              value={motionPrompt}
+              onChange={(e) => setMotionPrompt(e.target.value)}
+              placeholder="Describe motion intent..."
+              className="mt-3 w-full resize-none rounded-xl border border-border bg-background p-3 font-mono text-[12px] leading-5 text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
             />
             <button
               id="generate-motion-button"
               data-animate="true"
               type="button"
-              className="mt-3 h-11 w-full rounded-xl bg-primary text-[13px] font-semibold text-primary-foreground"
+              disabled={isGenerating}
+              onClick={handleGenerateMotionCode}
+              className="mt-3 flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-primary text-[13px] font-semibold text-primary-foreground hover:opacity-90 transition-opacity disabled:opacity-50"
             >
-              Generate Motion Code
+              {isGenerating ? (
+                <>
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent" />
+                  Generating Motion...
+                </>
+              ) : (
+                "Generate Motion Code (Live Preview)"
+              )}
             </button>
           </section>
 
+          {/* Spatial Coordinate Inspector Section */}
           <section id="spatial-inspector" data-animate="true" className="border-b border-border p-4">
             <div className="flex items-center justify-between">
               <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
                 Spatial Coordinate Inspector
               </p>
               <div className="flex items-center gap-1.5">
+                {/* Refresh Button */}
                 <button
                   id="spatial-refresh"
                   data-animate="true"
                   type="button"
-                  aria-label="Refresh / Recalculate coordinates"
-                  className="flex h-6 w-6 items-center justify-center rounded-md border border-border bg-surface-2 text-muted-foreground"
+                  onClick={updateCanvasAndSpatial}
+                  aria-label="Refresh coordinates"
+                  title="Recalculate Spatial Coordinates"
+                  className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-surface-2 text-muted-foreground hover:text-foreground transition-colors"
                 >
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M3 12a9 9 0 1 0 3-6.7" />
                     <path d="M3 4v5h5" />
                   </svg>
                 </button>
-                <span id="spatial-toggle" data-animate="true" className="flex h-6 w-6 items-center justify-center rounded-md border border-border bg-surface-2 text-[11px] text-muted-foreground">
-                  −
-                </span>
+
+                {/* COPY JSON BUTTON */}
+                <button
+                  id="spatial-copy-json"
+                  data-animate="true"
+                  type="button"
+                  onClick={handleCopyJSON}
+                  aria-label="Copy JSON"
+                  title="Copy Spatial JSON"
+                  className="flex h-7 px-2.5 items-center gap-1.5 rounded-md border border-border bg-surface-2 text-[11px] font-medium text-muted-foreground hover:text-foreground hover:border-primary/50 transition-colors"
+                >
+                  {copied ? (
+                    <>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5">
+                        <polyline points="20 6 9 17 4 12" />
+                      </svg>
+                      <span className="text-green-500">Copied!</span>
+                    </>
+                  ) : (
+                    <>
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                      </svg>
+                      <span>Copy JSON</span>
+                    </>
+                  )}
+                </button>
               </div>
             </div>
+
+            {/* Selectable / Copyable JSON Pre */}
             <pre
               id="spatial-manifest"
               data-animate="true"
-              className="mt-3 overflow-auto rounded-xl border border-border bg-background p-3 font-mono text-[11.5px] leading-5 text-code-str"
+              className="mt-3 overflow-auto rounded-xl border border-border bg-background p-3 font-mono text-[11.5px] leading-5 text-code-str select-all cursor-text focus:outline-none max-h-48"
             >
-{`{
-  "#streak-card":  { "x": 712, "y": 452, "w": 496, "h": 176 },
-  "#streak-icon":  { "x": 736, "y": 494, "w": 56,  "h": 56  },
-  "#streak-title": { "x": 808, "y": 486, "w": 172, "h": 28  },
-  "#streak-caption":{ "x": 808, "y": 518, "w": 128, "h": 20 }
-}`}
+              {JSON.stringify(spatialManifest, null, 2)}
             </pre>
           </section>
 
+          {/* Render Settings & Video Export Section */}
           <section id="render-settings" data-animate="true" className="p-4">
             <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-              Timeline &amp; Render
+              Timeline &amp; Video Export
             </p>
 
             <div className="mt-3 grid grid-cols-2 gap-2">
-              {["30 FPS", "60 FPS"].map((f, i) => (
+              {[30, 60].map((f) => (
                 <button
                   key={f}
-                  id={`framerate-${f.split(" ")[0]!}`}
-                  data-animate="true"
                   type="button"
-                  className={
-                    i === 1
-                      ? "h-9 rounded-lg bg-primary text-[12px] font-medium text-primary-foreground"
-                      : "h-9 rounded-lg border border-border bg-surface-2 text-[12px] text-muted-foreground"
-                  }
+                  onClick={() => setFramerate(f as 30 | 60)}
+                  className={`h-9 rounded-lg text-[12px] font-medium transition-colors ${
+                    framerate === f
+                      ? "bg-primary text-primary-foreground"
+                      : "border border-border bg-surface-2 text-muted-foreground hover:text-foreground"
+                  }`}
                 >
-                  {f}
+                  {f} FPS
                 </button>
               ))}
             </div>
 
             <div className="mt-2 grid grid-cols-3 gap-2">
-              {["MP4", "WebM", "Lottie"].map((f, i) => (
+              {(["mp4", "webm", "lottie"] as const).map((fmt) => (
                 <button
-                  key={f}
-                  id={`format-${f.toLowerCase()}`}
-                  data-animate="true"
+                  key={fmt}
                   type="button"
-                  className={
-                    i === 0
-                      ? "h-9 rounded-lg bg-primary text-[12px] font-medium text-primary-foreground"
-                      : "h-9 rounded-lg border border-border bg-surface-2 text-[12px] text-muted-foreground"
-                  }
+                  onClick={() => setExportFormat(fmt)}
+                  className={`h-9 rounded-lg text-[12px] font-medium uppercase transition-colors ${
+                    exportFormat === fmt
+                      ? "bg-primary text-primary-foreground"
+                      : "border border-border bg-surface-2 text-muted-foreground hover:text-foreground"
+                  }`}
                 >
-                  {f}
+                  {fmt}
                 </button>
               ))}
             </div>
 
-            <div id="timeline-scrubber" data-animate="true" className="mt-4 rounded-xl border border-border bg-background p-3">
-              <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-                <span>0.0s</span>
-                <span id="timeline-playhead-value">2.4s</span>
-                <span>5.0s</span>
-              </div>
-              <div className="relative mt-2 h-1.5 rounded-full bg-surface-2">
-                <div className="absolute inset-y-0 left-0 w-[48%] rounded-full bg-primary" />
-                <span className="absolute -top-1 left-[48%] h-3.5 w-3.5 -translate-x-1/2 rounded-full border border-border bg-primary" />
-              </div>
-              <div className="mt-3 space-y-1.5">
-                {["#streak-icon", "#streak-title", "#streak-caption"].map((id, i) => (
-                  <div key={id} id={`track-${id.slice(1)}`} data-animate="true" className="flex items-center gap-2">
-                    <span className="flex w-28 shrink-0 items-center gap-1.5">
-                      <button
-                        id={`track-visibility-${id.slice(1)}`}
-                        data-animate="true"
-                        type="button"
-                        aria-label={`Toggle visibility for ${id}`}
-                        className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground"
-                      >
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                          <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" />
-                          <circle cx="12" cy="12" r="3" />
-                        </svg>
-                      </button>
-                      <button
-                        id={`track-lock-${id.slice(1)}`}
-                        data-animate="true"
-                        type="button"
-                        aria-label={`Toggle lock for ${id}`}
-                        className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-muted-foreground hover:text-foreground"
-                      >
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                          <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
-                          <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-                        </svg>
-                      </button>
-                      <span className="truncate font-mono text-[10.5px] text-muted-foreground">{id}</span>
-                    </span>
-                    <span className="relative h-2 flex-1 rounded-full bg-surface-2">
-                      <span
-                        className="absolute inset-y-0 rounded-full bg-muted-foreground"
-                        style={{ left: `${i * 14}%`, width: `${52 - i * 8}%` }}
-                      />
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
+            {/* Render & Download Video Button */}
             <button
               id="render-download-button"
               data-animate="true"
               type="button"
-              className="mt-4 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-primary text-[13px] font-semibold text-primary-foreground"
+              disabled={isRendering}
+              onClick={handleRenderDownloadVideo}
+              className="mt-5 flex h-12 w-full items-center justify-center gap-2 rounded-xl bg-primary text-[13px] font-semibold text-primary-foreground hover:opacity-90 transition-opacity disabled:opacity-50 shadow-lg shadow-primary/20"
             >
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M12 3v12" />
-                <path d="m7 10 5 5 5-5" />
-                <path d="M5 21h14" />
-              </svg>
-              Render &amp; Download Video
+              {isRendering ? (
+                <>
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent" />
+                  Rendering MP4 via Puppeteer...
+                </>
+              ) : (
+                <>
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 3v12" />
+                    <path d="m7 10 5 5 5-5" />
+                    <path d="M5 21h14" />
+                  </svg>
+                  Render &amp; Download Video
+                </>
+              )}
             </button>
           </section>
         </aside>
