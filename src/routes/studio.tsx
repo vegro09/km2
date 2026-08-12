@@ -79,8 +79,6 @@ gsap.to("#streak-icon", {
   ease: "back.out(1.7)"
 });`;
 
-const DEFAULT_PROMPT = "Make the streak icon float up slightly with a gentle bounce, then scale the streak title.";
-
 type AspectRatioMode = "16:9" | "9:16" | "1:1";
 
 const ASPECT_RATIO_CONFIGS: Record<AspectRatioMode, { label: string; maxWidth: string; aspectClass: string; resolution: string }> = {
@@ -105,6 +103,9 @@ const ASPECT_RATIO_CONFIGS: Record<AspectRatioMode, { label: string; maxWidth: s
 };
 
 function Studio() {
+  // Project Info State
+  const [projectTitle, setProjectTitle] = useState("Daily Streak Widget Editor");
+
   // Left Panel States
   const [activeLeftTab, setActiveLeftTab] = useState<"code" | "dom">("code");
   const [activeCodeTab, setActiveCodeTab] = useState<"html" | "css" | "js">("html");
@@ -116,7 +117,6 @@ function Studio() {
 
   // Right Panel States & Tabs
   const [activeRightTab, setActiveRightTab] = useState<"spatial" | "manual">("spatial");
-  const [motionPrompt, setMotionPrompt] = useState(DEFAULT_PROMPT);
   const [manualCode, setManualCode] = useState(DEFAULT_JS);
   const [manualGsapError, setManualGsapError] = useState<string | null>(null);
 
@@ -136,9 +136,35 @@ function Studio() {
   const [copied, setCopied] = useState(false);
   const [framerate, setFramerate] = useState<30 | 60>(30);
   const [exportFormat, setExportFormat] = useState<"mp4" | "webm" | "lottie">("mp4");
-  const [isGenerating, setIsGenerating] = useState(false);
   const [isRendering, setIsRendering] = useState(false);
   const [renderedVideoUrl, setRenderedVideoUrl] = useState<string | null>(null);
+
+  // Persist project data into localStorage for Dashboard sync
+  useEffect(() => {
+    try {
+      const existingRaw = localStorage.getItem("kanto_projects");
+      let list = existingRaw ? JSON.parse(existingRaw) : [];
+      const currentId = "streak-card-proj";
+      const updatedProj = {
+        id: currentId,
+        title: projectTitle,
+        updatedAt: "Just now",
+        html: htmlCode,
+        css: cssCode,
+        js: manualCode,
+        kind: "streak"
+      };
+      const idx = list.findIndex((p: any) => p.id === currentId);
+      if (idx >= 0) {
+        list[idx] = updatedProj;
+      } else {
+        list.unshift(updatedProj);
+      }
+      localStorage.setItem("kanto_projects", JSON.stringify(list));
+    } catch {
+      // Ignore quota restrictions
+    }
+  }, [projectTitle, htmlCode, cssCode, manualCode]);
 
   // ---------------------------------------------------------------------------
   // Helper: Retrieve Active GSAP Instance from Timeline or Iframe Window
@@ -152,10 +178,9 @@ function Studio() {
     return null;
   }, []);
 
-  // Helper: Extract finite single-iteration duration (ignoring repeat: -1 Infinity)
+  // Helper: Extract finite single-iteration duration
   const getCleanDuration = useCallback((tl: any) => {
     if (!tl) return 2.0;
-    // .duration() returns single iteration duration, whereas .totalDuration() includes repeats
     const rawDur = typeof tl.duration === "function" ? tl.duration() : 2.0;
     if (typeof rawDur === "number" && isFinite(rawDur) && rawDur > 0) {
       return rawDur;
@@ -237,7 +262,6 @@ function Studio() {
 
     const gsapObj = iframeWin.gsap || gsap;
 
-    // Terminate all running timelines and tweens in iframe scope
     if (gsapObj && gsapObj.killTweensOf) {
       gsapObj.killTweensOf("*");
     }
@@ -246,7 +270,6 @@ function Studio() {
       timelineRef.current = null;
     }
 
-    // Hard-reset inline CSS styles for all target elements back to default CSS state
     if (iframeDoc.body) {
       const targets = iframeDoc.querySelectorAll('[id], [data-animate="true"], div, img, h1, h2, h3, p, span, svg');
       targets.forEach((el: any) => {
@@ -289,7 +312,6 @@ function Studio() {
         });
       });
     } else {
-      // Fallback default client-side animation preview
       const icon = iframeDoc.getElementById("streak-icon");
       const title = iframeDoc.getElementById("streak-title");
 
@@ -321,7 +343,6 @@ function Studio() {
 
     const gsapObj = iframeWin.gsap || gsap;
 
-    // 3a. Kill all running timelines and tweens in iframe scope
     if (gsapObj && gsapObj.killTweensOf) {
       gsapObj.killTweensOf("*");
     }
@@ -330,7 +351,6 @@ function Studio() {
       timelineRef.current = null;
     }
 
-    // 3b. Hard-reset inline CSS styles for all target elements back to default CSS baseline
     if (iframeDoc.body) {
       const targets = iframeDoc.querySelectorAll('[id], [data-animate="true"], div, img, h1, h2, h3, p, span, svg');
       targets.forEach((el: any) => {
@@ -343,24 +363,20 @@ function Studio() {
 
     setManualGsapError(null);
 
-    // 4. Dynamic Script Injection Pipeline into iframe scope
     try {
       const existingScript = iframeDoc.getElementById("user-motion-script");
       if (existingScript) {
         existingScript.remove();
       }
 
-      // Execute code directly inside iframeWindow scope
       const runInIframeScope = iframeWin.Function('gsap', 'document', 'window', manualCode);
       runInIframeScope(gsapObj, iframeDoc, iframeWin);
 
-      // Append fresh script tag into iframe body for DOM persistence
       const newScript = iframeDoc.createElement("script");
       newScript.id = "user-motion-script";
       newScript.textContent = `/* Kanto User Motion Script */\n${manualCode}`;
       iframeDoc.body.appendChild(newScript);
 
-      // Task 1: Extract finite single-iteration duration
       let cleanDur = 2.0;
       if (gsapObj.globalTimeline) {
         cleanDur = getCleanDuration(gsapObj.globalTimeline);
@@ -373,7 +389,6 @@ function Studio() {
     }
   }, [manualCode, getCleanDuration]);
 
-  // Listen for iframe scope errors via postMessage fallback
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
       if (event.data && event.data.type === "KANTO_GSAP_ERROR") {
@@ -384,7 +399,6 @@ function Studio() {
     return () => window.removeEventListener("message", handleMessage);
   }, []);
 
-  // Auto-execute JS animation live when manualCode changes (debounced)
   useEffect(() => {
     if (!manualCode || !manualCode.trim()) return;
     const timer = setTimeout(() => {
@@ -394,12 +408,11 @@ function Studio() {
   }, [manualCode, handleApplyManualMotion]);
 
   // ---------------------------------------------------------------------------
-  // 4. Player Controls: Play/Pause, Replay, Loop, YouTube-Style Realtime Scrubber
+  // 4. Player Controls: Play/Pause, Replay, Loop, Scrubber Seeking
   // ---------------------------------------------------------------------------
   const togglePlayPause = () => {
     const activeTL = getActiveTimeline();
     if (activeTL) {
-      // Task 2: Toggle state directly on the active GSAP instance
       if (activeTL.paused()) {
         activeTL.play();
         setIsPlaying(true);
@@ -419,7 +432,6 @@ function Studio() {
   const handleReset = () => {
     const activeTL = getActiveTimeline();
     if (activeTL && typeof activeTL.restart === "function") {
-      // Task 4: Replay Button triggers activeTL.restart()
       activeTL.restart();
       setIsPlaying(true);
     } else if (manualCode && manualCode.trim()) {
@@ -442,7 +454,6 @@ function Studio() {
     }
   };
 
-  // Task 3: YouTube-Style Realtime Scrubber (Seeker)
   const handleScrubberStart = () => {
     const activeTL = getActiveTimeline();
     if (activeTL) {
@@ -480,52 +491,7 @@ function Studio() {
   };
 
   // ---------------------------------------------------------------------------
-  // 5. Generate Motion Code Button (Triggers Live Preview Animation)
-  // ---------------------------------------------------------------------------
-  const handleGenerateMotionCode = async () => {
-    setIsGenerating(true);
-    try {
-      updateCanvasAndSpatial();
-
-      const res = await fetch("http://localhost:7007/api/generate-motion", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          html: htmlCode,
-          css: cssCode,
-          prompt: motionPrompt,
-          manualCode: manualCode
-        })
-      });
-
-      const data = await res.json();
-      if (data.success && data.motionPlan) {
-        const keyframes = data.motionPlan.elements_motion;
-        const tl = buildLiveAnimation(keyframes);
-        if (tl) {
-          tl.play();
-          setIsPlaying(true);
-        }
-      } else {
-        const tl = buildLiveAnimation();
-        if (tl) {
-          tl.play();
-          setIsPlaying(true);
-        }
-      }
-    } catch {
-      const tl = buildLiveAnimation();
-      if (tl) {
-        tl.play();
-        setIsPlaying(true);
-      }
-    } finally {
-      setIsGenerating(false);
-    }
-  };
-
-  // ---------------------------------------------------------------------------
-  // 6. Render & Download Video Button
+  // 5. Render & Download Video Button
   // ---------------------------------------------------------------------------
   const handleRenderDownloadVideo = async () => {
     setIsRendering(true);
@@ -536,7 +502,6 @@ function Studio() {
         body: JSON.stringify({
           html: htmlCode,
           css: cssCode,
-          prompt: motionPrompt,
           manualCode: manualCode
         })
       });
@@ -579,20 +544,38 @@ function Studio() {
 
   return (
     <div id="studio-screen" data-animate="true" className="flex h-screen flex-col bg-background select-none">
-      {/* Top Header */}
+      {/* Task 2: Top Navigation Bar Refactoring */}
       <header id="studio-topbar" data-animate="true" className="glass flex h-14 shrink-0 items-center justify-between border-b border-border px-4">
-        <div className="flex items-center gap-3">
-          <Link id="studio-brand" data-animate="true" to="/dashboard" className="flex items-center gap-2.5">
-            <span className="flex h-7 w-7 items-center justify-center rounded-lg border border-border bg-surface-2 text-[12px] font-semibold">
-              K
-            </span>
-            <span className="text-[11px] font-semibold uppercase tracking-[0.24em]">Kanto Motion</span>
+        {/* Top-Left: Clean Back Arrow Icon Button to Projects Dashboard */}
+        <div className="flex items-center gap-2">
+          <Link
+            id="studio-back-button"
+            data-animate="true"
+            to="/dashboard"
+            aria-label="Back to Dashboard"
+            title="Back to Projects Dashboard"
+            className="flex h-9 w-9 items-center justify-center rounded-xl border border-border bg-surface-2 text-muted-foreground hover:text-foreground hover:border-primary/40 transition-colors"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M19 12H5" />
+              <path d="M12 19l-7-7 7-7" />
+            </svg>
           </Link>
-          <span className="h-5 w-px bg-border" />
-          <span id="studio-project-name" data-animate="true" className="text-[13px] text-muted-foreground">
-            Daily Streak Widget Editor
-          </span>
         </div>
+
+        {/* Top-Center: Editable Project Title Display */}
+        <div className="flex items-center justify-center">
+          <input
+            id="studio-project-title-input"
+            type="text"
+            value={projectTitle}
+            onChange={(e) => setProjectTitle(e.target.value)}
+            placeholder="Project Title..."
+            className="bg-transparent text-center text-[13.5px] font-semibold text-foreground border-0 border-b border-transparent hover:border-border focus:border-primary focus:outline-none px-3 py-1 transition-colors rounded-lg"
+          />
+        </div>
+
+        {/* Top-Right: Clean Header Actions */}
         <div className="flex items-center gap-2">
           {renderedVideoUrl && (
             <a
@@ -604,12 +587,6 @@ function Studio() {
               Latest Video Rendered 🎬
             </a>
           )}
-          <span id="studio-save-state" data-animate="true" className="rounded-full border border-border bg-surface-2 px-3 py-1 text-[11px] text-muted-foreground">
-            Live Preview Active
-          </span>
-          <span id="studio-avatar" data-animate="true" className="flex h-7 w-7 items-center justify-center rounded-full border border-border bg-surface-2 text-[11px]">
-            VG
-          </span>
         </div>
       </header>
 
@@ -897,47 +874,16 @@ function Studio() {
               />
             </div>
 
-            {/* Dynamic Time Counter Display (Finite Single-Iteration Duration) */}
+            {/* Dynamic Time Counter Display */}
             <span id="playback-time-counter" data-animate="true" className="rounded-lg border border-border bg-surface-2 px-3 py-1 font-mono text-[11.5px] tabular-nums text-muted-foreground">
               {currentTime.toFixed(1)}s / {duration.toFixed(1)}s
             </span>
           </div>
         </main>
 
-        {/* RIGHT PANEL: Tabbed Inspector & Video Export */}
+        {/* RIGHT PANEL: Tabbed Inspector & Video Export (AI Section Removed) */}
         <aside id="right-sidebar" data-animate="true" className="flex w-[360px] shrink-0 flex-col overflow-auto border-l border-border bg-surface">
-          {/* AI Motion Director Prompt Section */}
-          <section id="ai-motion-prompt" data-animate="true" className="border-b border-border p-4">
-            <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">AI Motion Director</p>
-            <textarea
-              id="motion-prompt-input"
-              data-animate="true"
-              rows={4}
-              value={motionPrompt}
-              onChange={(e) => setMotionPrompt(e.target.value)}
-              placeholder="Describe motion intent..."
-              className="mt-3 w-full resize-none rounded-xl border border-border bg-background p-3 font-mono text-[12px] leading-5 text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
-            />
-            <button
-              id="generate-motion-button"
-              data-animate="true"
-              type="button"
-              disabled={isGenerating}
-              onClick={handleGenerateMotionCode}
-              className="mt-3 flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-primary text-[13px] font-semibold text-primary-foreground hover:opacity-90 transition-opacity disabled:opacity-50"
-            >
-              {isGenerating ? (
-                <>
-                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent" />
-                  Generating Motion...
-                </>
-              ) : (
-                "Generate Motion Code (Live Preview)"
-              )}
-            </button>
-          </section>
-
-          {/* TABBED CONTAINER: Tab 1: Spatial JSON | Tab 2: Manual GSAP */}
+          {/* Task 1: Tabbed Inspector shifted directly to the top of Right Sidebar */}
           <section id="tabbed-inspector-section" data-animate="true" className="border-b border-border p-4">
             {/* Tab Switcher Header */}
             <div className="flex items-center gap-1 border-b border-border pb-2 mb-3">
