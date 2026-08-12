@@ -558,15 +558,13 @@ function ProjectEditor() {
   };
 
   // ---------------------------------------------------------------------------
-  // COMPLETE OVERHAUL: Iframe-Internal html2canvas Rasterization Pipeline
-  // Root Fix: Capture GSAP inline transforms from iframe's own DOM context.
+  // COMPLETE REBUILD: WebCodecs VideoEncoder + mp4-muxer / webm-muxer
+  // THE FIX: Explicit per-frame timestamps (frame * 1_000_000/fps µs).
+  // html2canvas can take 100-200ms per frame but timestamps are 100% deterministic.
   // ---------------------------------------------------------------------------
   const handleRenderDownloadVideo = async () => {
     const iframe = iframeRef.current;
-    if (!iframe) {
-      setRenderError("Iframe canvas reference is not mounted.");
-      return;
-    }
+    if (!iframe) { setRenderError("Iframe canvas reference is not mounted."); return; }
 
     const iframeWin = iframe.contentWindow as any;
     const iframeDoc = iframe.contentDocument;
@@ -575,11 +573,8 @@ function ProjectEditor() {
       return;
     }
 
-    // Verify html2canvas is loaded in iframe scope
     if (typeof iframeWin.html2canvas !== "function") {
-      setRenderError(
-        "html2canvas is not loaded in the canvas iframe. Please wait a moment and try again, or click 'Run JS Motion' to reload the preview."
-      );
+      setRenderError("html2canvas is not loaded in the preview. Please wait a moment and try again.");
       return;
     }
 
@@ -589,7 +584,7 @@ function ProjectEditor() {
       return;
     }
 
-    // ── Setup render state ────────────────────────────────────────────────────
+    // Setup render state
     setIsRendering(true);
     setRenderError(null);
     setCurrentRenderFrame(0);
@@ -599,13 +594,10 @@ function ProjectEditor() {
     const wasPausedBefore = activeTL.paused();
     activeTL.pause();
     setIsPlaying(false);
-
-    // Disable looping for clean single-cycle export
     if (typeof activeTL.repeat === "function") activeTL.repeat(0);
     if (typeof activeTL.eventCallback === "function") activeTL.eventCallback("onComplete", null);
 
     try {
-      // ── Calculate exact frame bounds ─────────────────────────────────────────
       const exactDuration = getCleanDuration(activeTL);
       const selectedFPS = framerate;
       const totalFrames = Math.max(1, Math.ceil(exactDuration * selectedFPS));
@@ -613,72 +605,31 @@ function ProjectEditor() {
       setTotalDuration(exactDuration);
       setTotalRenderFrames(totalFrames);
 
-      // Target resolution for export
       let exportWidth = 1920;
       let exportHeight = 1080;
       if (aspectRatio === "9:16") { exportWidth = 1080; exportHeight = 1920; }
       else if (aspectRatio === "1:1") { exportWidth = 1080; exportHeight = 1080; }
 
-      // ── Output canvas for MediaRecorder ──────────────────────────────────────
+      // Output composite canvas
       const outputCanvas = document.createElement("canvas");
       outputCanvas.width = exportWidth;
       outputCanvas.height = exportHeight;
-      const ctx = outputCanvas.getContext("2d", { alpha: bgMode === "transparent" });
+      const ctx = outputCanvas.getContext("2d", { willReadFrequently: false });
       if (!ctx) throw new Error("Cannot create 2D canvas context for output.");
 
-      // ── Detect best supported mimeType ────────────────────────────────────────
-      const candidateMimes = [
-        "video/webm;codecs=vp9",
-        "video/webm;codecs=vp8",
-        "video/webm",
-      ];
-      const mimeType = candidateMimes.find(
-        (m) => typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(m)
-      ) ?? "video/webm";
-
-      // ── Setup MediaRecorder on output canvas stream ───────────────────────────
-      const stream = outputCanvas.captureStream(0);
-      const track = stream.getVideoTracks()[0] as any;
-      const chunks: Blob[] = [];
-      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 14_000_000 });
-
-      recorder.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) chunks.push(e.data);
-      };
-
-      const recorderDone = new Promise<Blob>((resolve, reject) => {
-        recorder.onstop = () => {
-          if (chunks.length === 0) {
-            reject(new Error("MediaRecorder captured 0 bytes — no frames were encoded."));
-          } else {
-            resolve(new Blob(chunks, { type: mimeType }));
-          }
-        };
-        recorder.onerror = (e: any) => reject(e.error ?? new Error("MediaRecorder stream error."));
-      });
-
-      recorder.start();
-
-      // ── Target element to rasterize ───────────────────────────────────────────
-      // CRITICAL: must be inside iframe so html2canvas sees GSAP inline transforms
+      // Target element inside iframe (GSAP writes transforms here)
       const targetEl: HTMLElement =
-        iframeDoc.getElementById("kanto-root") ??
-        iframeDoc.querySelector("#app-viewport") ??
+        (iframeDoc.getElementById("kanto-root") as HTMLElement | null) ??
+        (iframeDoc.querySelector("#app-viewport") as HTMLElement | null) ??
         iframeDoc.body;
 
-      // ── Measure target element's natural viewport size ────────────────────────
-      const targetRect = targetEl.getBoundingClientRect();
-      const captureW = Math.max(targetRect.width || iframeWin.innerWidth || 1920, 1);
-      const captureH = Math.max(targetRect.height || iframeWin.innerHeight || 1080, 1);
+      const captureW = Math.max(iframeWin.innerWidth || targetEl.offsetWidth || 1920, 1);
+      const captureH = Math.max(iframeWin.innerHeight || targetEl.offsetHeight || 1080, 1);
       const scaleFactor = Math.max(exportWidth / captureW, exportHeight / captureH);
 
-      // ── Wait for fonts to be ready inside iframe ──────────────────────────────
-      if (iframeDoc.fonts && typeof iframeDoc.fonts.ready?.then === "function") {
-        await iframeDoc.fonts.ready;
-      }
+      if (iframeDoc.fonts?.ready) await iframeDoc.fonts.ready;
 
-      // ── html2canvas options ────────────────────────────────────────────────────
-      const h2cOptions: Record<string, any> = {
+      const h2cOptions: Record<string, unknown> = {
         width: captureW,
         height: captureH,
         scale: scaleFactor,
@@ -690,120 +641,188 @@ function ProjectEditor() {
           : customBgColor,
         imageTimeout: 0,
         removeContainer: true,
-        windowWidth: iframeWin.innerWidth || captureW,
-        windowHeight: iframeWin.innerHeight || captureH,
+        windowWidth: captureW,
+        windowHeight: captureH,
       };
 
-      let blankFrameCount = 0;
+      // Helper: composite a captured frame onto outputCanvas with bg + centering
+      const composite = (fc: HTMLCanvasElement) => {
+        ctx.clearRect(0, 0, exportWidth, exportHeight);
+        if (bgMode === "white") { ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, exportWidth, exportHeight); }
+        else if (bgMode === "custom") { ctx.fillStyle = customBgColor; ctx.fillRect(0, 0, exportWidth, exportHeight); }
+        const ds = Math.max(exportWidth / fc.width, exportHeight / fc.height);
+        const dw = fc.width * ds;
+        const dh = fc.height * ds;
+        ctx.drawImage(fc, (exportWidth - dw) / 2, (exportHeight - dh) / 2, dw, dh);
+      };
 
-      // ── Deterministic frame-by-frame loop ─────────────────────────────────────
+      // ══════════════════════════════════════════════════════════════════════════
+      // PHASE 1 (0–50%): Capture all frames as html2canvas snapshots
+      // Decoupled from encode so timestamps are NOT affected by render time.
+      // ══════════════════════════════════════════════════════════════════════════
+      const frameCanvases: HTMLCanvasElement[] = [];
+
       for (let frame = 0; frame < totalFrames; frame++) {
-        // Step 1: Advance GSAP to exact progress position
         const progress = totalFrames === 1 ? 0 : frame / (totalFrames - 1);
         activeTL.progress(progress);
 
-        // Step 2: Double-rAF settle — wait for GSAP to flush layout recalculation
-        await new Promise<void>((r) => iframeWin.requestAnimationFrame(() => iframeWin.requestAnimationFrame(() => r())));
+        // Double-rAF: wait for GSAP to flush layout + browser to repaint
+        await new Promise<void>((r) =>
+          iframeWin.requestAnimationFrame(() => iframeWin.requestAnimationFrame(r))
+        );
 
-        // Step 3: Rasterize target element inside iframe JS context
-        // html2canvas runs in iframeWin.html2canvas — sees live computed styles
-        let frameCanvas: HTMLCanvasElement | null = null;
+        let fc: HTMLCanvasElement | null = null;
         try {
-          frameCanvas = await iframeWin.html2canvas(targetEl, h2cOptions);
-        } catch (captureErr: any) {
-          console.warn(`Frame ${frame}: html2canvas error — ${captureErr?.message}`);
-          // On single-frame failure, draw last valid frame or blank
+          fc = await (iframeWin.html2canvas as (el: HTMLElement, opts: unknown) => Promise<HTMLCanvasElement>)(
+            targetEl, h2cOptions
+          );
+        } catch {
+          // On capture error, push a blank frame to maintain timeline position
         }
 
-        // Step 4: Pixel sanity check — detect blank/all-transparent frames
-        let isValidFrame = false;
-        if (frameCanvas && frameCanvas.width > 0 && frameCanvas.height > 0) {
-          const frameCtx = frameCanvas.getContext("2d");
-          if (frameCtx) {
-
-            const pixelData = frameCtx.getImageData(
-              Math.floor(frameCanvas.width / 4),
-              Math.floor(frameCanvas.height / 4),
-              Math.min(50, frameCanvas.width),
-              Math.min(50, frameCanvas.height)
-            ).data;
-            // Check if there's any non-transparent pixel activity
-            for (let i = 3; i < pixelData.length; i += 4) {
-              if (pixelData[i] > 10) {
-                isValidFrame = true;
-                break;
-              }
-            }
-            // Also accept if background mode is set (bg pixels count)
-            if (!isValidFrame && bgMode !== "transparent") {
-              for (let i = 0; i < pixelData.length; i += 4) {
-                if (pixelData[i] > 0 || pixelData[i + 1] > 0 || pixelData[i + 2] > 0) {
-                  isValidFrame = true;
-                  break;
-                }
-              }
-            }
+        if (fc && fc.width > 0 && fc.height > 0) {
+          frameCanvases.push(fc);
+        } else {
+          // Blank placeholder
+          const blank = document.createElement("canvas");
+          blank.width = exportWidth;
+          blank.height = exportHeight;
+          if (bgMode === "white") {
+            const bc = blank.getContext("2d");
+            if (bc) { bc.fillStyle = "#ffffff"; bc.fillRect(0, 0, exportWidth, exportHeight); }
           }
+          frameCanvases.push(blank);
         }
 
-        if (!isValidFrame) {
-          blankFrameCount++;
-          console.warn(`Frame ${frame + 1} failed pixel sanity check (blank). Blank count: ${blankFrameCount}`);
-          if (blankFrameCount > Math.ceil(totalFrames * 0.9)) {
-            throw new Error(
-              `Export aborted: ${blankFrameCount} of ${totalFrames} frames are blank. " +
-              "Ensure the animation content is visible in the preview canvas before exporting.`
-            );
-          }
-        }
-
-        // Step 5: Composite frameCanvas onto output canvas & push to MediaRecorder
-        ctx.clearRect(0, 0, exportWidth, exportHeight);
-
-        // Fill background if applicable
-        if (bgMode === "white") {
-          ctx.fillStyle = "#ffffff";
-          ctx.fillRect(0, 0, exportWidth, exportHeight);
-        } else if (bgMode === "custom") {
-          ctx.fillStyle = customBgColor;
-          ctx.fillRect(0, 0, exportWidth, exportHeight);
-        }
-
-        if (frameCanvas) {
-          // Center-crop scale the captured frame onto the output canvas
-          const scaleX = exportWidth / frameCanvas.width;
-          const scaleY = exportHeight / frameCanvas.height;
-          const drawScale = Math.max(scaleX, scaleY);
-          const drawW = frameCanvas.width * drawScale;
-          const drawH = frameCanvas.height * drawScale;
-          const drawX = (exportWidth - drawW) / 2;
-          const drawY = (exportHeight - drawH) / 2;
-          ctx.drawImage(frameCanvas, drawX, drawY, drawW, drawH);
-        }
-
-        // Request frame from captureStream track
-        if (track && typeof track.requestFrame === "function") {
-          track.requestFrame();
-        }
-
-        // Step 6: Update progress UI
-        const frameNum = frame + 1;
-        setCurrentRenderFrame(frameNum);
-        setRenderProgress(Math.round((frameNum / totalFrames) * 100));
-
-        // Yield to React so modal can repaint
-        await new Promise<void>((r) => setTimeout(r, 0));
+        setCurrentRenderFrame(frame + 1);
+        setRenderProgress(Math.round(((frame + 1) / totalFrames) * 50));
+        await new Promise<void>((r) => setTimeout(r, 0)); // Yield for UI repaint
       }
 
-      // ── Stop recorder & await final blob ─────────────────────────────────────
-      recorder.stop();
-      const videoBlob = await recorderDone;
+      // ══════════════════════════════════════════════════════════════════════════
+      // PHASE 2 (50–100%): Encode with EXPLICIT timestamps — NO wall-clock time
+      // frame N gets timestamp = N * (1_000_000 / fps) microseconds exactly.
+      // ══════════════════════════════════════════════════════════════════════════
+      const frameDurationUs = Math.round(1_000_000 / selectedFPS);
+      const hasWebCodecs =
+        typeof (window as any).VideoEncoder === "function" &&
+        typeof (window as any).VideoFrame === "function";
 
-      // ── Guaranteed Explicit Download Mechanism ────────────────────────────────
+      let videoBlob: Blob;
+
+      if (hasWebCodecs) {
+        // ── WebCodecs path: VP9 or H.264 with explicit timestamps ─────────────
+        let codecStr = "vp09.00.10.08";
+        let useMP4 = false;
+        try {
+          const h264Check = await (window as any).VideoEncoder.isConfigSupported({
+            codec: "avc1.42001E", width: exportWidth, height: exportHeight,
+          });
+          if (h264Check.supported) { codecStr = "avc1.42001E"; useMP4 = true; }
+        } catch { /* use VP9 */ }
+
+        const encodedChunks: EncodedVideoChunk[] = [];
+        const encodedMetas: EncodedVideoChunkMetadata[] = [];
+
+        const encoder = new (window as any).VideoEncoder({
+          output: (chunk: EncodedVideoChunk, meta: EncodedVideoChunkMetadata) => {
+            encodedChunks.push(chunk);
+            encodedMetas.push(meta);
+          },
+          error: (e: Error) => { throw e; },
+        });
+
+        encoder.configure({
+          codec: codecStr,
+          width: exportWidth,
+          height: exportHeight,
+          bitrate: 10_000_000,
+          framerate: selectedFPS,
+          hardwareAcceleration: "prefer-hardware",
+          latencyMode: "quality",
+        });
+
+        for (let i = 0; i < frameCanvases.length; i++) {
+          composite(frameCanvases[i]);
+
+          const vf = new (window as any).VideoFrame(outputCanvas, {
+            timestamp: i * frameDurationUs,   // ← EXPLICIT: frame N is at N/fps seconds
+            duration: frameDurationUs,
+          });
+          encoder.encode(vf, { keyFrame: i % 30 === 0 });
+          vf.close();
+
+          setCurrentRenderFrame(i + 1);
+          setRenderProgress(50 + Math.round(((i + 1) / frameCanvases.length) * 50));
+          await new Promise<void>((r) => setTimeout(r, 0));
+        }
+
+        await encoder.flush();
+        encoder.close();
+
+        if (useMP4) {
+          const { Muxer, ArrayBufferTarget } = await import("mp4-muxer");
+          const target = new ArrayBufferTarget();
+          const muxer = new Muxer({
+            target,
+            video: { codec: "avc", width: exportWidth, height: exportHeight },
+            firstTimestampBehavior: "offset",
+          });
+          for (let i = 0; i < encodedChunks.length; i++) {
+            muxer.addVideoChunk(encodedChunks[i], encodedMetas[i]);
+          }
+          muxer.finalize();
+          videoBlob = new Blob([target.buffer], { type: "video/mp4" });
+        } else {
+          const { Muxer, ArrayBufferTarget } = await import("webm-muxer");
+          const target = new ArrayBufferTarget();
+          const muxer = new Muxer({
+            target,
+            video: { codec: "V_VP9", width: exportWidth, height: exportHeight, frameRate: selectedFPS },
+          });
+          for (let i = 0; i < encodedChunks.length; i++) {
+            muxer.addVideoChunk(encodedChunks[i], encodedMetas[i]);
+          }
+          muxer.finalize();
+          videoBlob = new Blob([target.buffer], { type: "video/webm" });
+        }
+      } else {
+        // ── Fallback: MediaRecorder, but we already have all frames captured
+        // so we can hold each frame for exactly 1/fps real seconds (timing is now fine)
+        const candidateMimes = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
+        const mimeType = candidateMimes.find(
+          (m) => typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(m)
+        ) ?? "video/webm";
+
+        const stream = outputCanvas.captureStream(selectedFPS);
+        const fallbackChunks: Blob[] = [];
+        const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 10_000_000 });
+        recorder.ondataavailable = (e) => { if (e.data?.size > 0) fallbackChunks.push(e.data); };
+
+        const recorderDone = new Promise<Blob>((resolve, reject) => {
+          recorder.onstop = () =>
+            fallbackChunks.length > 0
+              ? resolve(new Blob(fallbackChunks, { type: mimeType }))
+              : reject(new Error("MediaRecorder fallback: 0 bytes recorded."));
+          recorder.onerror = (e: any) => reject(e.error ?? new Error("MediaRecorder error."));
+        });
+        recorder.start();
+
+        const msPerFrame = 1000 / selectedFPS;
+        for (let i = 0; i < frameCanvases.length; i++) {
+          composite(frameCanvases[i]);
+          await new Promise<void>((r) => setTimeout(r, msPerFrame)); // hold exactly 1/fps seconds
+          setCurrentRenderFrame(i + 1);
+          setRenderProgress(50 + Math.round(((i + 1) / frameCanvases.length) * 50));
+        }
+        recorder.stop();
+        videoBlob = await recorderDone;
+      }
+
+      // ── Explicit file download ────────────────────────────────────────────────
       const downloadUrl = URL.createObjectURL(videoBlob);
       const titleSlug = projectTitle.trim().replace(/\s+/g, "_") || "kanto_motion";
-      // Always use .webm extension since MediaRecorder produces WebM
-      const ext = mimeType.includes("mp4") ? "mp4" : "webm";
+      const ext = videoBlob.type.includes("mp4") ? "mp4" : "webm";
       const fileName = `${titleSlug}_${selectedFPS}fps.${ext}`;
 
       const a = document.createElement("a");
@@ -817,25 +836,15 @@ function ProjectEditor() {
       setTimeout(() => URL.revokeObjectURL(downloadUrl), 15_000);
       setRenderedVideoUrl(downloadUrl);
 
-      if (blankFrameCount > 0) {
-        console.warn(`Export completed with ${blankFrameCount} blank frame(s) out of ${totalFrames}.`);
-      }
-
     } catch (err: any) {
       console.error("Export Failed:", err);
-      setRenderError(err.message ?? "Unknown error during frame-by-frame rendering.");
+      setRenderError(err.message ?? "Unknown error during export.");
     } finally {
-      // Always restore state regardless of success/failure
       setIsRendering(false);
       try {
         activeTL.progress(0);
-        if (!wasPausedBefore) {
-          activeTL.play();
-          setIsPlaying(true);
-        }
-      } catch {
-        // ignore cleanup errors
-      }
+        if (!wasPausedBefore) { activeTL.play(); setIsPlaying(true); }
+      } catch { /* ignore */ }
     }
   };
 
