@@ -24,6 +24,7 @@ export const Route = createFileRoute("/project/$id")({
 });
 
 type AspectRatioMode = "16:9" | "9:16" | "1:1";
+type BgMode = "transparent" | "white" | "custom";
 
 const ASPECT_RATIO_CONFIGS: Record<AspectRatioMode, { label: string; maxWidth: string; aspectClass: string; resolution: string }> = {
   "16:9": {
@@ -67,6 +68,10 @@ function ProjectEditor() {
   const [manualCode, setManualCode] = useState(DEFAULT_JS);
   const [manualGsapError, setManualGsapError] = useState<string | null>(null);
 
+  // Export Background Style States
+  const [bgMode, setBgMode] = useState<BgMode>("transparent");
+  const [customBgColor, setCustomBgColor] = useState<string>("#111115");
+
   // Center Canvas & Animation States
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const timelineRef = useRef<gsap.core.Timeline | null>(null);
@@ -86,12 +91,16 @@ function ProjectEditor() {
     isLoopingRef.current = isLooping;
   }, [isLooping]);
 
-  // Right Panel & Export States
+  // Right Panel & Frame-Accurate Export States
   const [spatialManifest, setSpatialManifest] = useState<Record<string, any>>({});
   const [copied, setCopied] = useState(false);
   const [framerate, setFramerate] = useState<30 | 60>(30);
-  const [exportFormat, setExportFormat] = useState<"mp4" | "webm" | "lottie">("mp4");
+  const [exportFormat, setExportFormat] = useState<"mp4" | "webm" | "lottie">("webm");
+
   const [isRendering, setIsRendering] = useState(false);
+  const [currentRenderFrame, setCurrentRenderFrame] = useState(0);
+  const [totalRenderFrames, setTotalRenderFrames] = useState(0);
+  const [renderProgress, setRenderProgress] = useState(0);
   const [renderedVideoUrl, setRenderedVideoUrl] = useState<string | null>(null);
 
   // Initial load of project by ID from localStorage
@@ -162,7 +171,7 @@ function ProjectEditor() {
     return null;
   }, []);
 
-  // Helper: Extract finite single-pass duration (Never Infinity)
+  // Helper: Extract finite single-pass duration
   const getSinglePassDuration = useCallback((tl: any) => {
     if (!tl) return 2.0;
     const rawDur = typeof tl.duration === "function" ? tl.duration() : 2.0;
@@ -178,6 +187,10 @@ function ProjectEditor() {
     const iframeDoc = iframeRef.current.contentDocument || iframeRef.current.contentWindow?.document;
     if (!iframeDoc) return;
 
+    let bodyBg = "transparent";
+    if (bgMode === "white") bodyBg = "#ffffff";
+    else if (bgMode === "custom") bodyBg = customBgColor;
+
     const fullDoc = `
       <!DOCTYPE html>
       <html>
@@ -186,7 +199,7 @@ function ProjectEditor() {
             body {
               margin: 0;
               padding: 0;
-              background: transparent;
+              background: ${bodyBg};
               display: flex;
               align-items: center;
               justify-content: center;
@@ -225,13 +238,13 @@ function ProjectEditor() {
 
       setSpatialManifest(manifest);
     }, 150);
-  }, [htmlCode, cssCode]);
+  }, [htmlCode, cssCode, bgMode, customBgColor]);
 
   useEffect(() => {
     updateCanvasAndSpatial();
   }, [updateCanvasAndSpatial]);
 
-  // GSAP Animation Engine Execution (No repeat: -1!)
+  // GSAP Animation Engine Execution
   const buildLiveAnimation = useCallback((keyframeSequence?: any[]) => {
     if (!iframeRef.current) return;
     const iframeWin = iframeRef.current.contentWindow as any;
@@ -258,19 +271,16 @@ function ProjectEditor() {
       });
     }
 
-    // Task 1: Fixed Duration Engine (repeat: 0, no repeat: -1!)
     const tl = gsapObj.timeline({
       paused: false,
       repeat: 0,
       onUpdate: () => {
-        // Task 2: Push real-time frame values to scrubber and counter
         const cur = tl.time();
         const p = tl.progress();
         setCurrentTime(cur);
         setScrubberProgress(p * 100);
       },
       onComplete: () => {
-        // Task 4: Restart if loop enabled, else naturally pause at progress(1)
         if (isLoopingRef.current) {
           tl.restart();
         } else {
@@ -406,9 +416,7 @@ function ProjectEditor() {
     return () => clearTimeout(timer);
   }, [manualCode, handleApplyManualMotion]);
 
-  // ---------------------------------------------------------------------------
-  // Task 3: Play / Pause Toggle Engine
-  // ---------------------------------------------------------------------------
+  // Play / Pause Toggle Engine
   const togglePlayPause = () => {
     const activeTL = getActiveTimeline();
     if (activeTL) {
@@ -432,9 +440,7 @@ function ProjectEditor() {
     }
   };
 
-  // ---------------------------------------------------------------------------
-  // Task 4: Restart & Loop Mechanics
-  // ---------------------------------------------------------------------------
+  // Restart & Loop Mechanics
   const handleRestart = () => {
     const activeTL = getActiveTimeline();
     if (activeTL && typeof activeTL.restart === "function") {
@@ -468,9 +474,7 @@ function ProjectEditor() {
     }
   };
 
-  // ---------------------------------------------------------------------------
-  // Task 2: Real-Time Scrubber & Frame Sync Dragging Mechanics
-  // ---------------------------------------------------------------------------
+  // Real-Time Scrubber Dragging Mechanics
   const handleScrubberStart = () => {
     const activeTL = getActiveTimeline();
     if (activeTL) {
@@ -505,37 +509,172 @@ function ProjectEditor() {
     }
   };
 
+  // ---------------------------------------------------------------------------
+  // EXPORT ENGINE OVERHAUL: Frame-by-Frame High Fidelity Render Pipeline
+  // ---------------------------------------------------------------------------
   const handleRenderDownloadVideo = async () => {
+    const activeTL = getActiveTimeline();
+    if (!activeTL) return;
+
     setIsRendering(true);
+    setCurrentRenderFrame(0);
+    setRenderProgress(0);
+
+    // 1. Temporarily pause GSAP timeline
+    activeTL.pause();
+    setIsPlaying(false);
+
+    // 2. Calculate total frames based on selected FPS (30 or 60) and single-pass duration
+    const fps = framerate;
+    const dur = getSinglePassDuration(activeTL);
+    const totalFrames = Math.max(1, Math.ceil(dur * fps));
+    setTotalRenderFrames(totalFrames);
+
+    // Determine export canvas dimensions matching active viewport aspect ratio
+    let exportWidth = 1920;
+    let exportHeight = 1080;
+    if (aspectRatio === "9:16") {
+      exportWidth = 1080;
+      exportHeight = 1920;
+    } else if (aspectRatio === "1:1") {
+      exportWidth = 1080;
+      exportHeight = 1080;
+    }
+
+    // Create offscreen render canvas
+    const canvas = document.createElement("canvas");
+    canvas.width = exportWidth;
+    canvas.height = exportHeight;
+    const ctx = canvas.getContext("2d", { alpha: true });
+    if (!ctx) {
+      setIsRendering(false);
+      return;
+    }
+
+    // 3. Alpha Channel & Video Encoding (vp9 / vp8 with alpha)
+    let mimeType = "video/webm;codecs=vp9";
+    if (typeof MediaRecorder !== "undefined" && !MediaRecorder.isTypeSupported(mimeType)) {
+      mimeType = "video/webm;codecs=vp8";
+    }
+    if (typeof MediaRecorder !== "undefined" && !MediaRecorder.isTypeSupported(mimeType)) {
+      mimeType = "video/webm";
+    }
+
     try {
-      const res = await fetch("http://localhost:7007/api/generate-motion", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          html: htmlCode,
-          css: cssCode,
-          manualCode: manualCode
-        })
-      });
+      const stream = canvas.captureStream(0);
+      const track = stream.getVideoTracks()[0] as any;
+      const chunks: Blob[] = [];
+      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 12000000 });
 
-      const data = await res.json();
-      if (data.success && data.videoUrl) {
-        const fullUrl = `http://localhost:7007${data.videoUrl}`;
-        setRenderedVideoUrl(fullUrl);
+      recorder.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) {
+          chunks.push(e.data);
+        }
+      };
 
+      recorder.onstop = () => {
+        const blob = new Blob(chunks, { type: mimeType });
+        const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
-        a.href = fullUrl;
-        a.download = `kanto_motion_${Date.now()}.mp4`;
+        a.href = url;
+
+        const titleSlug = projectTitle.toLowerCase().replace(/[^a-z0-9]/g, "_");
+        const aspectSlug = aspectRatio.replace(":", "_");
+        a.download = `${titleSlug}_${aspectSlug}_${bgMode}.webm`;
+
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
-      } else {
-        alert("Render failed: " + (data.error || "Unknown server error"));
+        URL.revokeObjectURL(url);
+        setRenderedVideoUrl(url);
+
+        setIsRendering(false);
+
+        // Reset timeline back to live playback mode
+        activeTL.progress(0);
+        activeTL.play();
+        setIsPlaying(true);
+      };
+
+      recorder.start();
+
+      const iframeDoc = iframeRef.current?.contentDocument;
+      if (!iframeDoc || !iframeDoc.documentElement) {
+        recorder.stop();
+        setIsRendering(false);
+        return;
       }
+
+      // 4. Sequential Frame-by-Frame Rendering Loop
+      for (let frame = 0; frame <= totalFrames; frame++) {
+        const prog = frame / totalFrames;
+        activeTL.progress(prog);
+
+        ctx.clearRect(0, 0, exportWidth, exportHeight);
+
+        // Apply background style
+        if (bgMode === "white") {
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(0, 0, exportWidth, exportHeight);
+        } else if (bgMode === "custom") {
+          ctx.fillStyle = customBgColor;
+          ctx.fillRect(0, 0, exportWidth, exportHeight);
+        }
+
+        // Draw DOM frame onto canvas
+        const clonedBody = iframeDoc.body.cloneNode(true) as HTMLElement;
+        const styleContent = Array.from(iframeDoc.querySelectorAll("style"))
+          .map((s) => s.innerHTML)
+          .join("\n");
+
+        const svgMarkup = `
+          <svg xmlns="http://www.w3.org/2000/svg" width="${exportWidth}" height="${exportHeight}">
+            <style>
+              body { margin:0; padding:0; background:transparent; display:flex; align-items:center; justify-content:center; min-height:100vh; overflow:hidden; }
+              ${styleContent}
+            </style>
+            <foreignObject width="100%" height="100%">
+              <div xmlns="http://www.w3.org/1999/xhtml" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;background:transparent;">
+                ${clonedBody.innerHTML}
+              </div>
+            </foreignObject>
+          </svg>
+        `;
+
+        const img = new Image();
+        const svgBlob = new Blob([svgMarkup], { type: "image/svg+xml;charset=utf-8" });
+        const svgUrl = URL.createObjectURL(svgBlob);
+
+        await new Promise<void>((resolve) => {
+          img.onload = () => {
+            ctx.drawImage(img, 0, 0, exportWidth, exportHeight);
+            URL.revokeObjectURL(svgUrl);
+            resolve();
+          };
+          img.onerror = () => {
+            URL.revokeObjectURL(svgUrl);
+            resolve();
+          };
+          img.src = svgUrl;
+        });
+
+        // Request exact frame capture into MediaRecorder stream
+        if (track && track.requestFrame) {
+          track.requestFrame();
+        }
+
+        setCurrentRenderFrame(frame);
+        setRenderProgress(Math.round((frame / totalFrames) * 100));
+
+        // Short yield for UI modal update
+        await new Promise((r) => setTimeout(r, 12));
+      }
+
+      recorder.stop();
     } catch (err: any) {
-      alert("Render request error: " + err.message);
-    } finally {
+      console.error("Frame-accurate render error:", err);
       setIsRendering(false);
+      alert("Render error: " + err.message);
     }
   };
 
@@ -556,9 +695,38 @@ function ProjectEditor() {
 
   return (
     <div id="studio-screen" data-animate="true" className="flex h-screen flex-col bg-background select-none">
+      {/* Task 4: Render Status Modal Overlay */}
+      {isRendering && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4">
+          <div className="w-full max-w-sm rounded-2xl border border-border bg-surface p-6 shadow-2xl text-center">
+            <div className="flex justify-center mb-4">
+              <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-primary/40 bg-primary/10 text-primary shadow-inner">
+                <span className="h-7 w-7 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+              </div>
+            </div>
+            <h3 className="text-base font-semibold text-foreground">Rendering Animation</h3>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Frame-accurate capture ({framerate} FPS)
+            </p>
+
+            {/* Progress Bar */}
+            <div className="mt-5 w-full bg-surface-2 rounded-full h-2.5 overflow-hidden border border-border">
+              <div
+                className="bg-primary h-full transition-all duration-75 ease-out rounded-full"
+                style={{ width: `${renderProgress}%` }}
+              />
+            </div>
+
+            <div className="mt-3 flex items-center justify-between font-mono text-[11px] text-muted-foreground">
+              <span>Frame {currentRenderFrame} / {totalRenderFrames}</span>
+              <span className="text-primary font-semibold">{renderProgress}%</span>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Top Header */}
       <header id="studio-topbar" data-animate="true" className="glass flex h-14 shrink-0 items-center justify-between border-b border-border px-4">
-        {/* Top-Left: Back Arrow Icon Button to Projects Dashboard */}
         <div className="flex items-center gap-2">
           <button
             id="studio-back-button"
@@ -576,7 +744,6 @@ function ProjectEditor() {
           </button>
         </div>
 
-        {/* Top-Center: Editable Project Title */}
         <div className="flex items-center justify-center">
           <input
             id="studio-project-title-input"
@@ -588,7 +755,6 @@ function ProjectEditor() {
           />
         </div>
 
-        {/* Top-Right: Video Download Link */}
         <div className="flex items-center gap-2">
           {renderedVideoUrl && (
             <a
@@ -597,7 +763,7 @@ function ProjectEditor() {
               rel="noreferrer"
               className="rounded-full border border-primary/40 bg-primary/10 px-3 py-1 text-[11px] font-medium text-primary hover:bg-primary/20"
             >
-              Latest Video Rendered 🎬
+              Latest WebM Rendered 🎬
             </a>
           )}
         </div>
@@ -637,7 +803,6 @@ function ProjectEditor() {
 
           {activeLeftTab === "code" ? (
             <div className="flex min-h-0 flex-1 flex-col p-3">
-              {/* Code Editor Sub-Tabs ([HTML] | [CSS] | [JS]) */}
               <div className="flex items-center justify-between mb-2">
                 <div className="flex gap-1">
                   <button
@@ -679,7 +844,6 @@ function ProjectEditor() {
                 </span>
               </div>
 
-              {/* Editable Textarea */}
               <div className="relative flex-1 min-h-0 flex flex-col rounded-xl border border-border bg-background">
                 {activeCodeTab === "html" && (
                   <textarea
@@ -808,11 +972,9 @@ function ProjectEditor() {
             </div>
           </div>
 
-          {/* BRAND-NEW PRODUCTION-READY TIMELINE CONTROLLER */}
+          {/* Timeline Controller */}
           <div id="playback-control-bar" data-animate="true" className="glass flex h-14 shrink-0 items-center justify-between border-t border-border px-4">
-            {/* Playback Controls (Play/Pause, Restart, Loop) */}
             <div className="flex items-center gap-2">
-              {/* 1. Play / Pause Toggle Button */}
               <button
                 id="playback-play-pause"
                 data-animate="true"
@@ -834,7 +996,6 @@ function ProjectEditor() {
                 )}
               </button>
 
-              {/* 2. Restart Button (↻) */}
               <button
                 id="playback-restart"
                 data-animate="true"
@@ -850,7 +1011,6 @@ function ProjectEditor() {
                 </svg>
               </button>
 
-              {/* 3. Loop Toggle Button (🔁) */}
               <button
                 id="playback-loop"
                 data-animate="true"
@@ -873,7 +1033,6 @@ function ProjectEditor() {
               </button>
             </div>
 
-            {/* Real-Time Frame Sync Scrubber Slider (0 to 100%) */}
             <div className="flex items-center gap-3 flex-1 max-w-sm mx-6">
               <input
                 id="timeline-scrubber"
@@ -891,7 +1050,6 @@ function ProjectEditor() {
               />
             </div>
 
-            {/* Fixed Duration Counter Display (${currentTime.toFixed(1)}s / ${totalDuration.toFixed(1)}s) */}
             <div className="flex items-center gap-2">
               <span
                 id="playback-time-counter"
@@ -904,7 +1062,7 @@ function ProjectEditor() {
           </div>
         </main>
 
-        {/* RIGHT PANEL: Tabbed Inspector & Video Export */}
+        {/* RIGHT PANEL: Tabbed Inspector & Refactored Export Engine */}
         <aside id="right-sidebar" data-animate="true" className="flex w-[360px] shrink-0 flex-col overflow-auto border-l border-border bg-surface">
           <section id="tabbed-inspector-section" data-animate="true" className="border-b border-border p-4">
             <div className="flex items-center gap-1 border-b border-border pb-2 mb-3">
@@ -1039,45 +1197,122 @@ function ProjectEditor() {
             )}
           </section>
 
+          {/* Task 1: Refactored Video Export & Background Mode Controls */}
           <section id="render-settings" data-animate="true" className="p-4">
             <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-              Timeline &amp; Video Export
+              High-Fidelity Export Engine
             </p>
 
-            <div className="mt-3 grid grid-cols-2 gap-2">
-              {[30, 60].map((f) => (
+            {/* Task 1: Background Style Toggle Group */}
+            <div className="mt-3">
+              <p className="text-[10.5px] font-medium uppercase tracking-wider text-muted-foreground mb-2">
+                Background Style
+              </p>
+              <div className="grid grid-cols-3 gap-1.5 p-1 rounded-xl border border-border bg-surface-2">
                 <button
-                  key={f}
+                  id="bg-transparent-button"
                   type="button"
-                  onClick={() => setFramerate(f as 30 | 60)}
-                  className={`h-9 rounded-lg text-[12px] font-medium transition-colors ${
-                    framerate === f
-                      ? "bg-primary text-primary-foreground"
-                      : "border border-border bg-surface-2 text-muted-foreground hover:text-foreground"
+                  onClick={() => setBgMode("transparent")}
+                  className={`h-8 rounded-lg text-[11.5px] font-medium transition-colors ${
+                    bgMode === "transparent"
+                      ? "bg-primary text-primary-foreground font-semibold shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
-                  {f} FPS
+                  Transparent
                 </button>
-              ))}
-            </div>
-
-            <div className="mt-2 grid grid-cols-3 gap-2">
-              {(["mp4", "webm", "lottie"] as const).map((fmt) => (
                 <button
-                  key={fmt}
+                  id="bg-white-button"
                   type="button"
-                  onClick={() => setExportFormat(fmt)}
-                  className={`h-9 rounded-lg text-[12px] font-medium uppercase transition-colors ${
-                    exportFormat === fmt
-                      ? "bg-primary text-primary-foreground"
-                      : "border border-border bg-surface-2 text-muted-foreground hover:text-foreground"
+                  onClick={() => setBgMode("white")}
+                  className={`h-8 rounded-lg text-[11.5px] font-medium transition-colors ${
+                    bgMode === "white"
+                      ? "bg-primary text-primary-foreground font-semibold shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
                   }`}
                 >
-                  {fmt}
+                  White
                 </button>
-              ))}
+                <button
+                  id="bg-custom-button"
+                  type="button"
+                  onClick={() => setBgMode("custom")}
+                  className={`h-8 rounded-lg text-[11.5px] font-medium transition-colors ${
+                    bgMode === "custom"
+                      ? "bg-primary text-primary-foreground font-semibold shadow-sm"
+                      : "text-muted-foreground hover:text-foreground"
+                  }`}
+                >
+                  Custom
+                </button>
+              </div>
+
+              {bgMode === "custom" && (
+                <div className="mt-2 flex items-center justify-between gap-3 p-2 rounded-xl border border-border bg-background">
+                  <span className="text-[11px] text-muted-foreground font-mono">Hex Color</span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      id="bg-color-picker"
+                      type="color"
+                      value={customBgColor}
+                      onChange={(e) => setCustomBgColor(e.target.value)}
+                      className="h-7 w-7 rounded border-0 bg-transparent cursor-pointer"
+                    />
+                    <span className="text-[11px] font-mono text-foreground uppercase">{customBgColor}</span>
+                  </div>
+                </div>
+              )}
             </div>
 
+            {/* Framerate Selection (30 / 60 FPS) */}
+            <div className="mt-4">
+              <p className="text-[10.5px] font-medium uppercase tracking-wider text-muted-foreground mb-2">
+                Target Framerate
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                {[30, 60].map((f) => (
+                  <button
+                    key={f}
+                    id={`fps-${f}`}
+                    type="button"
+                    onClick={() => setFramerate(f as 30 | 60)}
+                    className={`h-9 rounded-lg text-[12px] font-medium transition-colors ${
+                      framerate === f
+                        ? "bg-primary text-primary-foreground font-semibold"
+                        : "border border-border bg-surface-2 text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {f} FPS
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Format Selection */}
+            <div className="mt-3">
+              <p className="text-[10.5px] font-medium uppercase tracking-wider text-muted-foreground mb-2">
+                Export Format
+              </p>
+              <div className="grid grid-cols-3 gap-2">
+                {(["webm", "mp4", "lottie"] as const).map((fmt) => (
+                  <button
+                    key={fmt}
+                    id={`fmt-${fmt}`}
+                    type="button"
+                    onClick={() => setExportFormat(fmt)}
+                    className={`h-9 rounded-lg text-[12px] font-medium uppercase transition-colors ${
+                      exportFormat === fmt
+                        ? "bg-primary text-primary-foreground font-semibold"
+                        : "border border-border bg-surface-2 text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    {fmt}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Primary Render & Download Action Button */}
             <button
               id="render-download-button"
               data-animate="true"
@@ -1089,7 +1324,7 @@ function ProjectEditor() {
               {isRendering ? (
                 <>
                   <span className="h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent" />
-                  Rendering MP4 via Puppeteer...
+                  Rendering Frames...
                 </>
               ) : (
                 <>
@@ -1098,7 +1333,7 @@ function ProjectEditor() {
                     <path d="m7 10 5 5 5-5" />
                     <path d="M5 21h14" />
                   </svg>
-                  Render &amp; Download Video
+                  Render &amp; Download {bgMode === "transparent" ? "Alpha WebM" : "Video"}
                 </>
               )}
             </button>
