@@ -1,5 +1,10 @@
-import { createFileRoute, Link } from "@tanstack/react-router";
+import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
 import { useState, useEffect } from "react";
+import {
+  getProjects,
+  createDefaultProject,
+  Project
+} from "../utils/projectsStore";
 
 export const Route = createFileRoute("/dashboard")({
   head: () => ({
@@ -21,13 +26,6 @@ export const Route = createFileRoute("/dashboard")({
   }),
   component: Dashboard,
 });
-
-interface ProjectItem {
-  id: string;
-  title: string;
-  updatedAt: string;
-  kind?: string;
-}
 
 function Thumb({ kind }: { kind?: string }) {
   const base = "flex h-full w-full items-center justify-center rounded-xl border border-border bg-background";
@@ -60,23 +58,20 @@ function Thumb({ kind }: { kind?: string }) {
 }
 
 function Dashboard() {
-  const [projectsList, setProjectsList] = useState<ProjectItem[]>([]);
+  const navigate = useNavigate();
+  const [projectsList, setProjectsList] = useState<Project[]>([]);
   const [searchTerm, setSearchTerm] = useState("");
 
-  // Load real projects from localStorage
+  // Task 4: Fetch real user projects dynamically from localStorage
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem("kanto_projects");
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          setProjectsList(parsed);
-        }
-      }
-    } catch {
-      setProjectsList([]);
-    }
+    setProjectsList(getProjects());
   }, []);
+
+  // Task 4: "Create New Project" handler instantiates record and navigates to /project/:id
+  const handleCreateNewProject = () => {
+    const newProj = createDefaultProject("New Motion Project");
+    navigate({ to: "/project/$id", params: { id: newProj.id } });
+  };
 
   const filteredProjects = projectsList.filter((p) =>
     p.title.toLowerCase().includes(searchTerm.toLowerCase())
@@ -98,13 +93,14 @@ function Dashboard() {
             <span className="text-[12px] font-semibold uppercase tracking-[0.24em]">Kanto Motion</span>
           </Link>
           <div className="flex items-center gap-3">
-            <Link
+            <button
               id="header-create-project-button"
-              to="/studio"
+              type="button"
+              onClick={handleCreateNewProject}
               className="flex h-9 items-center justify-center rounded-xl bg-primary px-4 text-xs font-semibold text-primary-foreground hover:opacity-90 transition-opacity"
             >
               + New Project
-            </Link>
+            </button>
           </div>
         </div>
       </header>
@@ -122,14 +118,15 @@ function Dashboard() {
                 Edit HTML/CSS layouts, craft 60fps GSAP animations, and render deterministic MP4 video exports.
               </p>
             </div>
-            <Link
+            <button
               id="create-project-button"
               data-animate="true"
-              to="/studio"
+              type="button"
+              onClick={handleCreateNewProject}
               className="flex h-12 shrink-0 items-center justify-center rounded-xl bg-primary px-6 text-sm font-semibold text-primary-foreground shadow-md shadow-primary/20 hover:opacity-90 transition-opacity"
             >
               + Create New Motion Project
-            </Link>
+            </button>
           </div>
 
           <div className="mt-8 grid grid-cols-2 gap-3 md:grid-cols-4">
@@ -192,13 +189,14 @@ function Dashboard() {
             <p className="mt-2 text-sm text-muted-foreground max-w-sm">
               You haven't created any motion projects yet. Create your first project workspace to start animating HTML/CSS components with GSAP.
             </p>
-            <Link
+            <button
               id="empty-create-project-button"
-              to="/studio"
+              type="button"
+              onClick={handleCreateNewProject}
               className="mt-6 flex h-11 items-center justify-center gap-2 rounded-xl bg-primary px-6 text-sm font-semibold text-primary-foreground hover:opacity-90 transition-opacity shadow-md shadow-primary/20"
             >
               + Create New Project
-            </Link>
+            </button>
           </section>
         ) : (
           <section id="project-grid" data-animate="true" className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
@@ -210,12 +208,16 @@ function Dashboard() {
                 <div className="flex items-end justify-between px-1 pb-1 pt-4">
                   <div>
                     <h2 className="text-sm font-semibold">{p.title || "Untitled Project"}</h2>
-                    <p className="mt-1 text-[11px] text-muted-foreground">Edited {p.updatedAt || "Recently"}</p>
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      Edited {p.updatedAt ? new Date(p.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Recently"}
+                    </p>
                   </div>
+                  {/* Clicking any project card opens /project/:id */}
                   <Link
                     id={`open-editor-${p.id}`}
                     data-animate="true"
-                    to="/studio"
+                    to="/project/$id"
+                    params={{ id: p.id }}
                     className="flex h-9 items-center rounded-lg border border-border bg-surface-2 px-3 text-[12px] font-medium hover:border-primary/50 transition-colors"
                   >
                     Open Editor
