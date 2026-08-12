@@ -71,19 +71,27 @@ const DEFAULT_CSS = `/* Base Canvas Styles */
   color: #a1a1aa;
 }`;
 
+const DEFAULT_JS = `// Custom GSAP Animation Script
+gsap.to("#streak-icon", {
+  y: -15,
+  scale: 1.2,
+  duration: 0.8,
+  ease: "back.out(1.7)"
+});`;
+
 const DEFAULT_PROMPT = "Make the streak icon float up slightly with a gentle bounce, then scale the streak title.";
 
 function Studio() {
   // Left Panel States
   const [activeLeftTab, setActiveLeftTab] = useState<"code" | "dom">("code");
-  const [activeCodeTab, setActiveCodeTab] = useState<"html" | "css">("html");
+  const [activeCodeTab, setActiveCodeTab] = useState<"html" | "css" | "js">("html");
   const [htmlCode, setHtmlCode] = useState(DEFAULT_HTML);
   const [cssCode, setCssCode] = useState(DEFAULT_CSS);
 
   // Right Panel States & Tabs
   const [activeRightTab, setActiveRightTab] = useState<"spatial" | "manual">("spatial");
   const [motionPrompt, setMotionPrompt] = useState(DEFAULT_PROMPT);
-  const [manualCode, setManualCode] = useState("gsap.to('#streak-icon', { y: -20, scale: 1.2, duration: 0.8, ease: 'back.out(1.7)' });");
+  const [manualCode, setManualCode] = useState(DEFAULT_JS);
   const [manualGsapError, setManualGsapError] = useState<string | null>(null);
 
   // Center Canvas & Animation States
@@ -279,7 +287,7 @@ function Studio() {
   // Handle Play/Pause
   const togglePlayPause = () => {
     if (!timelineRef.current) {
-      if (manualCode && manualCode.trim() && activeRightTab === "manual") {
+      if (manualCode && manualCode.trim() && (activeRightTab === "manual" || activeCodeTab === "js")) {
         handleApplyManualMotion();
       } else {
         const tl = buildLiveAnimation();
@@ -306,7 +314,7 @@ function Studio() {
 
   // Handle Reset / Replay
   const handleReset = () => {
-    if (manualCode && manualCode.trim() && activeRightTab === "manual") {
+    if (manualCode && manualCode.trim() && (activeRightTab === "manual" || activeCodeTab === "js")) {
       handleApplyManualMotion();
       return;
     }
@@ -508,7 +516,7 @@ function Studio() {
 
           {activeLeftTab === "code" ? (
             <div className="flex min-h-0 flex-1 flex-col p-3">
-              {/* Code Editor Sub-Tabs (HTML vs CSS) */}
+              {/* Code Editor Sub-Tabs ([HTML] | [CSS] | [JS]) */}
               <div className="flex items-center justify-between mb-2">
                 <div className="flex gap-1">
                   <button
@@ -516,7 +524,7 @@ function Studio() {
                     onClick={() => setActiveCodeTab("html")}
                     className={`px-3 py-1 text-[11px] font-mono rounded-md transition-colors ${
                       activeCodeTab === "html"
-                        ? "bg-primary/20 text-primary border border-primary/30"
+                        ? "bg-primary/20 text-primary border border-primary/30 font-semibold"
                         : "bg-surface-2 text-muted-foreground hover:text-foreground"
                     }`}
                   >
@@ -527,11 +535,22 @@ function Studio() {
                     onClick={() => setActiveCodeTab("css")}
                     className={`px-3 py-1 text-[11px] font-mono rounded-md transition-colors ${
                       activeCodeTab === "css"
-                        ? "bg-primary/20 text-primary border border-primary/30"
+                        ? "bg-primary/20 text-primary border border-primary/30 font-semibold"
                         : "bg-surface-2 text-muted-foreground hover:text-foreground"
                     }`}
                   >
                     CSS
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setActiveCodeTab("js")}
+                    className={`px-3 py-1 text-[11px] font-mono rounded-md transition-colors ${
+                      activeCodeTab === "js"
+                        ? "bg-primary/20 text-primary border border-primary/30 font-semibold"
+                        : "bg-surface-2 text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    JS
                   </button>
                 </div>
                 <span className="text-[10px] text-muted-foreground uppercase tracking-wider">
@@ -540,8 +559,8 @@ function Studio() {
               </div>
 
               {/* Editable Textarea */}
-              <div className="relative flex-1 min-h-0 rounded-xl border border-border bg-background">
-                {activeCodeTab === "html" ? (
+              <div className="relative flex-1 min-h-0 flex flex-col rounded-xl border border-border bg-background">
+                {activeCodeTab === "html" && (
                   <textarea
                     id="html-code-input"
                     value={htmlCode}
@@ -549,7 +568,8 @@ function Studio() {
                     placeholder="Enter HTML markup here..."
                     className="h-full w-full resize-none border-0 bg-transparent p-3 font-mono text-[12px] leading-5 text-foreground focus:outline-none focus:ring-1 focus:ring-primary rounded-xl"
                   />
-                ) : (
+                )}
+                {activeCodeTab === "css" && (
                   <textarea
                     id="css-code-input"
                     value={cssCode}
@@ -557,6 +577,32 @@ function Studio() {
                     placeholder="Enter CSS styles here..."
                     className="h-full w-full resize-none border-0 bg-transparent p-3 font-mono text-[12px] leading-5 text-foreground focus:outline-none focus:ring-1 focus:ring-primary rounded-xl"
                   />
+                )}
+                {activeCodeTab === "js" && (
+                  <div className="flex flex-col h-full">
+                    <textarea
+                      id="js-code-input"
+                      value={manualCode}
+                      onChange={(e) => {
+                        setManualCode(e.target.value);
+                        if (manualGsapError) setManualGsapError(null);
+                      }}
+                      placeholder="Enter GSAP animation script here..."
+                      className="flex-1 w-full resize-none border-0 bg-transparent p-3 font-mono text-[12px] leading-5 text-foreground focus:outline-none focus:ring-1 focus:ring-primary rounded-xl"
+                    />
+                    <div className="p-2 border-t border-border bg-surface-2/50 rounded-b-xl flex items-center justify-between">
+                      <span className="text-[10px] font-mono text-muted-foreground">
+                        GSAP v3.12 Loaded
+                      </span>
+                      <button
+                        type="button"
+                        onClick={handleApplyManualMotion}
+                        className="px-3 py-1 rounded-lg bg-primary text-[11px] font-semibold text-primary-foreground hover:opacity-90 transition-opacity"
+                      >
+                        Run JS Motion
+                      </button>
+                    </div>
+                  </div>
                 )}
               </div>
             </div>
