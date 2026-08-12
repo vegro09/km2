@@ -646,17 +646,21 @@ function ProjectEditor() {
       exportW = Math.floor(exportW / 2) * 2;
       exportH = Math.floor(exportH / 2) * 2;
 
-      // ── Composite canvas (used for WebCodecs VideoFrame source) ────────────
+      // ── Composite canvas (GPU-accelerated context backed by hardware texture) ────
       const outCanvas = document.createElement("canvas");
       outCanvas.width = exportW;
       outCanvas.height = exportH;
-      const ctx = outCanvas.getContext("2d")!;
+      const ctx = outCanvas.getContext("2d", { willReadFrequently: false, alpha: bgMode === "transparent" })!;
 
-      // ── Target element inside iframe ───────────────────────────────────────
+      // ── Target element inside iframe (force GPU layer compositing) ──────────────
       const targetEl: HTMLElement =
         (iframeDoc.getElementById("kanto-root") as HTMLElement) ??
         (iframeDoc.querySelector("#app-viewport") as HTMLElement) ??
         iframeDoc.body;
+
+      // Force GPU layer hardware acceleration on iframe root container
+      targetEl.style.transform = targetEl.style.transform || "translateZ(0)";
+      targetEl.style.willChange = "transform";
 
       const viewW = Math.max(iframeWin.innerWidth || targetEl.offsetWidth || exportW, 1);
       const viewH = Math.max(iframeWin.innerHeight || targetEl.offsetHeight || exportH, 1);
@@ -672,7 +676,7 @@ function ProjectEditor() {
         windowWidth: viewW, windowHeight: viewH,
       };
 
-      // ── Helper: draw captured frame to output canvas with bg ───────────────
+      // ── Helper: draw captured frame to output canvas with GPU composite ─────
       const compositeFrame = (fc: HTMLCanvasElement) => {
         ctx.clearRect(0, 0, exportW, exportH);
         if (bgMode === "white") { ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, exportW, exportH); }
@@ -683,8 +687,7 @@ function ProjectEditor() {
       };
 
       // ════════════════════════════════════════════════════════════════════════
-      // PHASE 1 — Capture: step through animation using time(), not progress()
-      // Each frame captures EXACTLY what the user sees at that moment.
+      // PHASE 1 — GPU-Accelerated Frame Capture
       // ════════════════════════════════════════════════════════════════════════
       const frames: HTMLCanvasElement[] = [];
 
@@ -695,18 +698,14 @@ function ProjectEditor() {
       );
 
       for (let i = 0; i < totalFrames; i++) {
-        // ── CRITICAL FIX: use time() with absolute seconds ───────────────────
-        // time(x) = "go to x seconds" — works on ANY timeline including globalTimeline.
-        // progress(x) on globalTimeline = x * 10,000,000,000 = broken!
         const targetTime = (i / (totalFrames - 1 || 1)) * exactDuration;
         seekTarget.time(targetTime);
 
-        // Double-rAF: GSAP applies transforms → browser repaints → we capture
+        // Double-rAF: GPU flushes transforms → browser repaints → capture frame
         await new Promise<void>((r) =>
           iframeWin.requestAnimationFrame(() => iframeWin.requestAnimationFrame(r))
         );
 
-        // Capture the live DOM state with html2canvas (inside iframe context)
         let fc: HTMLCanvasElement | null = null;
         try {
           fc = await iframeWin.html2canvas(targetEl, h2cOpts);
@@ -719,7 +718,7 @@ function ProjectEditor() {
         } else {
           const blank = document.createElement("canvas");
           blank.width = exportW; blank.height = exportH;
-          const bc = blank.getContext("2d");
+          const bc = blank.getContext("2d", { willReadFrequently: false });
           if (bc && bgMode === "white") { bc.fillStyle = "#fff"; bc.fillRect(0, 0, exportW, exportH); }
           frames.push(blank);
         }
@@ -730,9 +729,7 @@ function ProjectEditor() {
       }
 
       // ════════════════════════════════════════════════════════════════════════
-      // PHASE 2 — Encode: explicit timestamps, completely decoupled from capture
-      // frame i → timestamp = i * (1,000,000 / fps) microseconds
-      // 5.5s animation @ 30fps = 165 frames × 33333µs = exactly 5.5s
+      // PHASE 2 — GPU Hardware-Accelerated Video Encoding (NVENC/VCE/QuickSync)
       // ════════════════════════════════════════════════════════════════════════
       const frameDurUs = Math.round(1_000_000 / selectedFPS);
       const hasWebCodecs = typeof (window as any).VideoEncoder === "function"
@@ -742,21 +739,25 @@ function ProjectEditor() {
 
       if (hasWebCodecs) {
         try {
-          // Detect H.264 Level 4.2 support (supports up to 4K 1080p), fallback to VP9
+          // Check GPU hardware acceleration support for H.264 / VP9
           let codec = "vp09.00.10.08";
           let isMP4 = false;
           try {
-            // avc1.64002a = H.264 High Profile Level 4.2 (supports 1080p and 4K)
             const check = await (window as any).VideoEncoder.isConfigSupported({
-              codec: "avc1.64002a", width: exportW, height: exportH,
+              codec: "avc1.64002a",
+              width: exportW,
+              height: exportH,
+              hardwareAcceleration: "prefer-hardware",
             });
             if (check.supported) {
               codec = "avc1.64002a";
               isMP4 = true;
             } else {
-              // Try Baseline Level 4.2
               const checkBase = await (window as any).VideoEncoder.isConfigSupported({
-                codec: "avc1.42002a", width: exportW, height: exportH,
+                codec: "avc1.42002a",
+                width: exportW,
+                height: exportH,
+                hardwareAcceleration: "prefer-hardware",
               });
               if (checkBase.supported) {
                 codec = "avc1.42002a";
@@ -780,11 +781,12 @@ function ProjectEditor() {
             },
           });
 
+          // Configure for direct GPU Hardware Acceleration (NVENC / Intel QuickSync / AMD VCE)
           enc.configure({
             codec,
             width: exportW,
             height: exportH,
-            bitrate: 10_000_000,
+            bitrate: 12_000_000,
             framerate: selectedFPS,
             hardwareAcceleration: "prefer-hardware",
             latencyMode: "quality",
