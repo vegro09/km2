@@ -184,9 +184,18 @@ function Studio() {
 
     const gsapObj = iframeWin.gsap || gsap;
 
-    // Reset previous timeline
+    // Reset previous timeline & inline styles to clean baseline
     if (timelineRef.current) {
       timelineRef.current.kill();
+    }
+
+    if (iframeDoc.body) {
+      const targets = iframeDoc.querySelectorAll('[id], [data-animate="true"]');
+      targets.forEach((el: any) => {
+        if (gsapObj && gsapObj.set) {
+          gsapObj.set(el, { clearProps: "all" });
+        }
+      });
     }
 
     const tl = gsapObj.timeline({
@@ -239,7 +248,7 @@ function Studio() {
   }, [isLooping]);
 
   // ---------------------------------------------------------------------------
-  // 3. Apply Manual Motion Direct Execution Handler
+  // 3. Apply Manual Motion Direct Execution Handler (With DOM Style Reset)
   // ---------------------------------------------------------------------------
   const handleApplyManualMotion = useCallback(() => {
     if (!iframeRef.current) return;
@@ -247,47 +256,62 @@ function Studio() {
     const iframeDoc = iframeRef.current.contentDocument;
     if (!iframeWin || !iframeDoc) return;
 
-    // First reset canvas DOM to clean state
-    updateCanvasAndSpatial();
+    const gsapObj = iframeWin.gsap || gsap;
 
-    setTimeout(() => {
-      try {
-        const gsapObj = iframeWin.gsap || gsap;
+    // Reset previous timeline
+    if (timelineRef.current) {
+      timelineRef.current.kill();
+    }
 
-        if (timelineRef.current) {
-          timelineRef.current.kill();
+    // Reset target elements inline styles to clean baseline before animation
+    if (iframeDoc.body) {
+      const targets = iframeDoc.querySelectorAll('[id], [data-animate="true"]');
+      targets.forEach((el: any) => {
+        if (gsapObj && gsapObj.set) {
+          gsapObj.set(el, { clearProps: "all" });
         }
+      });
+    }
 
-        setManualGsapError(null);
+    setManualGsapError(null);
 
-        const tl = gsapObj.timeline({
-          repeat: isLooping ? -1 : 0,
-          onUpdate: () => {
-            setCurrentTime(tl.time());
-          },
-          onComplete: () => {
-            if (!isLooping) setIsPlaying(false);
-          }
-        });
+    try {
+      const tl = gsapObj.timeline({
+        repeat: isLooping ? -1 : 0,
+        onUpdate: () => {
+          setCurrentTime(tl.time());
+        },
+        onComplete: () => {
+          if (!isLooping) setIsPlaying(false);
+        }
+      });
 
-        // Evaluate user manual code passing gsap, timeline, and document context
-        const runUserGsap = new Function('gsap', 'tl', 'document', manualCode);
-        runUserGsap(gsapObj, tl, iframeDoc);
+      // Evaluate user JS script passing gsap, timeline, and document context
+      const runUserGsap = new Function('gsap', 'tl', 'document', manualCode);
+      runUserGsap(gsapObj, tl, iframeDoc);
 
-        setDuration(tl.duration() || 2.0);
-        timelineRef.current = tl;
-        tl.play();
-        setIsPlaying(true);
-      } catch (err: any) {
-        setManualGsapError(err.message || "Syntax or Execution Error in GSAP Code");
-      }
-    }, 100);
-  }, [manualCode, updateCanvasAndSpatial, isLooping]);
+      setDuration(tl.duration() || 2.0);
+      timelineRef.current = tl;
+      tl.play();
+      setIsPlaying(true);
+    } catch (err: any) {
+      setManualGsapError(err.message || "Syntax or Execution Error in GSAP Code");
+    }
+  }, [manualCode, isLooping]);
 
-  // Handle Play/Pause
+  // Auto-execute JS animation live when manualCode changes (debounced)
+  useEffect(() => {
+    if (!manualCode || !manualCode.trim()) return;
+    const timer = setTimeout(() => {
+      handleApplyManualMotion();
+    }, 450);
+    return () => clearTimeout(timer);
+  }, [manualCode, handleApplyManualMotion]);
+
+  // Handle Play/Pause button
   const togglePlayPause = () => {
     if (!timelineRef.current) {
-      if (manualCode && manualCode.trim() && (activeRightTab === "manual" || activeCodeTab === "js")) {
+      if (manualCode && manualCode.trim()) {
         handleApplyManualMotion();
       } else {
         const tl = buildLiveAnimation();
@@ -304,17 +328,22 @@ function Studio() {
       setIsPlaying(false);
     } else {
       if (timelineRef.current.progress() === 1) {
-        timelineRef.current.restart();
+        if (manualCode && manualCode.trim()) {
+          handleApplyManualMotion();
+        } else {
+          timelineRef.current.restart();
+          setIsPlaying(true);
+        }
       } else {
         timelineRef.current.play();
+        setIsPlaying(true);
       }
-      setIsPlaying(true);
     }
   };
 
   // Handle Reset / Replay
   const handleReset = () => {
-    if (manualCode && manualCode.trim() && (activeRightTab === "manual" || activeCodeTab === "js")) {
+    if (manualCode && manualCode.trim()) {
       handleApplyManualMotion();
       return;
     }
@@ -592,7 +621,7 @@ function Studio() {
                     />
                     <div className="p-2 border-t border-border bg-surface-2/50 rounded-b-xl flex items-center justify-between">
                       <span className="text-[10px] font-mono text-muted-foreground">
-                        GSAP v3.12 Loaded
+                        GSAP v3.12 Live Engine
                       </span>
                       <button
                         type="button"
