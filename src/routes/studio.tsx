@@ -84,6 +84,7 @@ function Studio() {
   const [activeRightTab, setActiveRightTab] = useState<"spatial" | "manual">("spatial");
   const [motionPrompt, setMotionPrompt] = useState(DEFAULT_PROMPT);
   const [manualCode, setManualCode] = useState("gsap.to('#streak-icon', { y: -20, scale: 1.2, duration: 0.8, ease: 'back.out(1.7)' });");
+  const [manualGsapError, setManualGsapError] = useState<string | null>(null);
 
   // Center Canvas & Animation States
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -229,13 +230,63 @@ function Studio() {
     return tl;
   }, [isLooping]);
 
+  // ---------------------------------------------------------------------------
+  // 3. Apply Manual Motion Direct Execution Handler
+  // ---------------------------------------------------------------------------
+  const handleApplyManualMotion = useCallback(() => {
+    if (!iframeRef.current) return;
+    const iframeWin = iframeRef.current.contentWindow as any;
+    const iframeDoc = iframeRef.current.contentDocument;
+    if (!iframeWin || !iframeDoc) return;
+
+    // First reset canvas DOM to clean state
+    updateCanvasAndSpatial();
+
+    setTimeout(() => {
+      try {
+        const gsapObj = iframeWin.gsap || gsap;
+
+        if (timelineRef.current) {
+          timelineRef.current.kill();
+        }
+
+        setManualGsapError(null);
+
+        const tl = gsapObj.timeline({
+          repeat: isLooping ? -1 : 0,
+          onUpdate: () => {
+            setCurrentTime(tl.time());
+          },
+          onComplete: () => {
+            if (!isLooping) setIsPlaying(false);
+          }
+        });
+
+        // Evaluate user manual code passing gsap, timeline, and document context
+        const runUserGsap = new Function('gsap', 'tl', 'document', manualCode);
+        runUserGsap(gsapObj, tl, iframeDoc);
+
+        setDuration(tl.duration() || 2.0);
+        timelineRef.current = tl;
+        tl.play();
+        setIsPlaying(true);
+      } catch (err: any) {
+        setManualGsapError(err.message || "Syntax or Execution Error in GSAP Code");
+      }
+    }, 100);
+  }, [manualCode, updateCanvasAndSpatial, isLooping]);
+
   // Handle Play/Pause
   const togglePlayPause = () => {
     if (!timelineRef.current) {
-      const tl = buildLiveAnimation();
-      if (tl) {
-        tl.play();
-        setIsPlaying(true);
+      if (manualCode && manualCode.trim() && activeRightTab === "manual") {
+        handleApplyManualMotion();
+      } else {
+        const tl = buildLiveAnimation();
+        if (tl) {
+          tl.play();
+          setIsPlaying(true);
+        }
       }
       return;
     }
@@ -255,6 +306,11 @@ function Studio() {
 
   // Handle Reset / Replay
   const handleReset = () => {
+    if (manualCode && manualCode.trim() && activeRightTab === "manual") {
+      handleApplyManualMotion();
+      return;
+    }
+
     if (timelineRef.current) {
       timelineRef.current.restart();
       setIsPlaying(true);
@@ -278,7 +334,7 @@ function Studio() {
   };
 
   // ---------------------------------------------------------------------------
-  // 3. Generate Motion Code Button (Triggers Live Preview Animation)
+  // 4. Generate Motion Code Button (Triggers Live Preview Animation)
   // ---------------------------------------------------------------------------
   const handleGenerateMotionCode = async () => {
     setIsGenerating(true);
@@ -327,7 +383,7 @@ function Studio() {
   };
 
   // ---------------------------------------------------------------------------
-  // 4. Render & Download Video Button (Triggers Puppeteer/FFmpeg Pipeline)
+  // 5. Render & Download Video Button (Triggers Puppeteer/FFmpeg Pipeline)
   // ---------------------------------------------------------------------------
   const handleRenderDownloadVideo = async () => {
     setIsRendering(true);
@@ -366,7 +422,7 @@ function Studio() {
   };
 
   // ---------------------------------------------------------------------------
-  // 5. Copy JSON Handler
+  // 6. Copy JSON Handler
   // ---------------------------------------------------------------------------
   const handleCopyJSON = () => {
     const jsonStr = JSON.stringify(spatialManifest, null, 2);
@@ -786,11 +842,39 @@ function Studio() {
                 <textarea
                   id="manual-code-editor"
                   value={manualCode}
-                  onChange={(e) => setManualCode(e.target.value)}
+                  onChange={(e) => {
+                    setManualCode(e.target.value);
+                    if (manualGsapError) setManualGsapError(null);
+                  }}
                   placeholder="e.g. gsap.to('#streak-icon', { y: -30, duration: 1 });"
                   rows={6}
                   className="w-full resize-none rounded-xl border border-border bg-background p-3 font-mono text-[12px] leading-5 text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
                 />
+
+                {/* Primary Action Button: Apply Manual Motion */}
+                <button
+                  id="apply-manual-motion-button"
+                  type="button"
+                  onClick={handleApplyManualMotion}
+                  className="mt-3 flex h-10 w-full items-center justify-center gap-2 rounded-xl bg-primary text-[12.5px] font-semibold text-primary-foreground hover:opacity-90 transition-opacity shadow-md shadow-primary/20"
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M8 5v14l11-7z" />
+                  </svg>
+                  Apply Manual Motion
+                </button>
+
+                {/* Error Badge for GSAP Syntax/Execution Errors */}
+                {manualGsapError && (
+                  <div className="mt-2.5 flex items-start gap-2 rounded-xl border border-red-500/40 bg-red-500/10 p-2.5 text-[11px] text-red-400">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0 mt-0.5">
+                      <circle cx="12" cy="12" r="10" />
+                      <line x1="12" y1="8" x2="12" y2="12" />
+                      <line x1="12" y1="16" x2="12.01" y2="16" />
+                    </svg>
+                    <span className="font-mono text-[11px] leading-4 break-all">{manualGsapError}</span>
+                  </div>
+                )}
               </div>
             )}
           </section>
