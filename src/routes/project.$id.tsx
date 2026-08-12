@@ -171,14 +171,43 @@ function ProjectEditor() {
     return null;
   }, []);
 
-  // Helper: Extract finite single-pass duration
-  const getSinglePassDuration = useCallback((tl: any) => {
+  // Task 1: Strict Animation Duration Sanitizer
+  const getCleanDuration = useCallback((tl: any): number => {
     if (!tl) return 2.0;
-    const rawDur = typeof tl.duration === "function" ? tl.duration() : 2.0;
-    if (typeof rawDur === "number" && isFinite(rawDur) && rawDur > 0) {
-      return rawDur;
+
+    let dur = 2.0;
+    try {
+      if (typeof tl.duration === "function") {
+        dur = tl.duration();
+      }
+    } catch {
+      dur = 2.0;
     }
-    return 2.0;
+
+    // Fallback if dur is Infinity, NaN, <= 0, or exceeds 30 seconds
+    if (!isFinite(dur) || isNaN(dur) || dur <= 0 || dur > 30) {
+      if (typeof tl.getChildren === "function") {
+        try {
+          const children = tl.getChildren(true, true, true);
+          const maxChildEnd = children.reduce((max: number, child: any) => {
+            const childEnd = typeof child.endTime === "function" ? child.endTime() : 0;
+            return Math.max(max, isFinite(childEnd) ? childEnd : 0);
+          }, 0);
+
+          if (maxChildEnd > 0 && isFinite(maxChildEnd)) {
+            dur = maxChildEnd;
+          }
+        } catch {
+          dur = 2.0;
+        }
+      }
+    }
+
+    // Enforce hard ceiling bounds: [0.5s, 30s]
+    if (!isFinite(dur) || isNaN(dur) || dur <= 0) {
+      dur = 2.0;
+    }
+    return Math.min(Math.max(dur, 0.5), 30);
   }, []);
 
   // Live Canvas DOM Injection
@@ -321,12 +350,12 @@ function ProjectEditor() {
       }
     }
 
-    const singleDur = getSinglePassDuration(tl);
+    const singleDur = getCleanDuration(tl);
     setTotalDuration(singleDur);
     timelineRef.current = tl;
     setIsPlaying(true);
     return tl;
-  }, [getSinglePassDuration]);
+  }, [getCleanDuration]);
 
   // Dynamic JS Script Injection Pipeline
   const handleApplyManualMotion = useCallback(() => {
@@ -373,7 +402,7 @@ function ProjectEditor() {
 
       if (gsapObj.globalTimeline) {
         const globalTL = gsapObj.globalTimeline;
-        const dur = getSinglePassDuration(globalTL);
+        const dur = getCleanDuration(globalTL);
         setTotalDuration(dur);
 
         globalTL.eventCallback("onUpdate", () => {
@@ -396,7 +425,7 @@ function ProjectEditor() {
     } catch (err: any) {
       setManualGsapError(err.message || "Syntax or Execution Error in GSAP Code");
     }
-  }, [manualCode, getSinglePassDuration]);
+  }, [manualCode, getCleanDuration]);
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
@@ -510,27 +539,29 @@ function ProjectEditor() {
   };
 
   // ---------------------------------------------------------------------------
-  // EXPORT ENGINE OVERHAUL: Frame-by-Frame High Fidelity Render Pipeline
+  // EXPORT ENGINE: Controlled Frame-by-Frame Render Pipeline
   // ---------------------------------------------------------------------------
   const handleRenderDownloadVideo = async () => {
     const activeTL = getActiveTimeline();
     if (!activeTL) return;
 
-    setIsRendering(true);
+    // Task 1: Strict Animation Duration Sanitizer
+    const sanitizedDuration = getCleanDuration(activeTL);
+    const selectedFPS = framerate;
+
+    // Task 2: Accurate Frame Counter (Never infinity!)
+    const totalFrames = Math.max(1, Math.ceil(sanitizedDuration * selectedFPS));
+
+    setTotalDuration(sanitizedDuration);
+    setTotalRenderFrames(totalFrames);
     setCurrentRenderFrame(0);
     setRenderProgress(0);
+    setIsRendering(true);
 
-    // 1. Temporarily pause GSAP timeline
+    // Temporarily pause GSAP timeline
     activeTL.pause();
     setIsPlaying(false);
 
-    // 2. Calculate total frames based on selected FPS (30 or 60) and single-pass duration
-    const fps = framerate;
-    const dur = getSinglePassDuration(activeTL);
-    const totalFrames = Math.max(1, Math.ceil(dur * fps));
-    setTotalRenderFrames(totalFrames);
-
-    // Determine export canvas dimensions matching active viewport aspect ratio
     let exportWidth = 1920;
     let exportHeight = 1080;
     if (aspectRatio === "9:16") {
@@ -541,7 +572,6 @@ function ProjectEditor() {
       exportHeight = 1080;
     }
 
-    // Create offscreen render canvas
     const canvas = document.createElement("canvas");
     canvas.width = exportWidth;
     canvas.height = exportHeight;
@@ -551,7 +581,6 @@ function ProjectEditor() {
       return;
     }
 
-    // 3. Alpha Channel & Video Encoding (vp9 / vp8 with alpha)
     let mimeType = "video/webm;codecs=vp9";
     if (typeof MediaRecorder !== "undefined" && !MediaRecorder.isTypeSupported(mimeType)) {
       mimeType = "video/webm;codecs=vp8";
@@ -605,14 +634,13 @@ function ProjectEditor() {
         return;
       }
 
-      // 4. Sequential Frame-by-Frame Rendering Loop
-      for (let frame = 0; frame <= totalFrames; frame++) {
-        const prog = frame / totalFrames;
-        activeTL.progress(prog);
+      // Task 3: Controlled Render Loop strictly from frame = 0 to totalFrames - 1
+      for (let frame = 0; frame < totalFrames; frame++) {
+        const progress = totalFrames > 1 ? frame / (totalFrames - 1) : 1;
+        activeTL.progress(progress);
 
         ctx.clearRect(0, 0, exportWidth, exportHeight);
 
-        // Apply background style
         if (bgMode === "white") {
           ctx.fillStyle = "#ffffff";
           ctx.fillRect(0, 0, exportWidth, exportHeight);
@@ -621,7 +649,6 @@ function ProjectEditor() {
           ctx.fillRect(0, 0, exportWidth, exportHeight);
         }
 
-        // Draw DOM frame onto canvas
         const clonedBody = iframeDoc.body.cloneNode(true) as HTMLElement;
         const styleContent = Array.from(iframeDoc.querySelectorAll("style"))
           .map((s) => s.innerHTML)
@@ -658,15 +685,13 @@ function ProjectEditor() {
           img.src = svgUrl;
         });
 
-        // Request exact frame capture into MediaRecorder stream
         if (track && track.requestFrame) {
           track.requestFrame();
         }
 
-        setCurrentRenderFrame(frame);
-        setRenderProgress(Math.round((frame / totalFrames) * 100));
+        setCurrentRenderFrame(frame + 1);
+        setRenderProgress(Math.round(((frame + 1) / totalFrames) * 100));
 
-        // Short yield for UI modal update
         await new Promise((r) => setTimeout(r, 12));
       }
 
@@ -695,7 +720,7 @@ function ProjectEditor() {
 
   return (
     <div id="studio-screen" data-animate="true" className="flex h-screen flex-col bg-background select-none">
-      {/* Task 4: Render Status Modal Overlay */}
+      {/* Task 2: Render Status Modal Overlay with Preview Metrics */}
       {isRendering && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4">
           <div className="w-full max-w-sm rounded-2xl border border-border bg-surface p-6 shadow-2xl text-center">
@@ -705,8 +730,8 @@ function ProjectEditor() {
               </div>
             </div>
             <h3 className="text-base font-semibold text-foreground">Rendering Animation</h3>
-            <p className="mt-1 text-xs text-muted-foreground">
-              Frame-accurate capture ({framerate} FPS)
+            <p className="mt-1 font-mono text-[11.5px] text-muted-foreground">
+              Exporting: {totalDuration.toFixed(1)}s @ {framerate} FPS ({totalRenderFrames} total frames)
             </p>
 
             {/* Progress Bar */}
@@ -1197,13 +1222,12 @@ function ProjectEditor() {
             )}
           </section>
 
-          {/* Task 1: Refactored Video Export & Background Mode Controls */}
+          {/* Export Settings & Background Controls */}
           <section id="render-settings" data-animate="true" className="p-4">
             <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
               High-Fidelity Export Engine
             </p>
 
-            {/* Task 1: Background Style Toggle Group */}
             <div className="mt-3">
               <p className="text-[10.5px] font-medium uppercase tracking-wider text-muted-foreground mb-2">
                 Background Style
@@ -1264,7 +1288,6 @@ function ProjectEditor() {
               )}
             </div>
 
-            {/* Framerate Selection (30 / 60 FPS) */}
             <div className="mt-4">
               <p className="text-[10.5px] font-medium uppercase tracking-wider text-muted-foreground mb-2">
                 Target Framerate
@@ -1288,7 +1311,6 @@ function ProjectEditor() {
               </div>
             </div>
 
-            {/* Format Selection */}
             <div className="mt-3">
               <p className="text-[10.5px] font-medium uppercase tracking-wider text-muted-foreground mb-2">
                 Export Format
@@ -1312,7 +1334,6 @@ function ProjectEditor() {
               </div>
             </div>
 
-            {/* Primary Render & Download Action Button */}
             <button
               id="render-download-button"
               data-animate="true"
