@@ -80,7 +80,8 @@ function Studio() {
   const [htmlCode, setHtmlCode] = useState(DEFAULT_HTML);
   const [cssCode, setCssCode] = useState(DEFAULT_CSS);
 
-  // AI Prompt & Manual GSAP Code
+  // Right Panel States & Tabs
+  const [activeRightTab, setActiveRightTab] = useState<"spatial" | "manual">("spatial");
   const [motionPrompt, setMotionPrompt] = useState(DEFAULT_PROMPT);
   const [manualCode, setManualCode] = useState("gsap.to('#streak-icon', { y: -20, scale: 1.2, duration: 0.8, ease: 'back.out(1.7)' });");
 
@@ -522,20 +523,6 @@ function Studio() {
               </ul>
             </div>
           )}
-
-          {/* Manual GSAP Code Override Input */}
-          <div className="border-t border-border p-3">
-            <p className="px-1 text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-              Manual GSAP Override (Optional)
-            </p>
-            <input
-              type="text"
-              value={manualCode}
-              onChange={(e) => setManualCode(e.target.value)}
-              placeholder="e.g. gsap.to('#streak-icon', { y: -30 });"
-              className="mt-2 w-full rounded-lg border border-border bg-background px-3 py-2 font-mono text-[11.5px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
-            />
-          </div>
         </aside>
 
         {/* CENTER PANEL: Live DOM Canvas Viewport */}
@@ -661,7 +648,7 @@ function Studio() {
           </div>
         </main>
 
-        {/* RIGHT PANEL: Spatial Inspector & Video Export */}
+        {/* RIGHT PANEL: Tabbed Inspector & Video Export */}
         <aside id="right-sidebar" data-animate="true" className="flex w-[360px] shrink-0 flex-col overflow-auto border-l border-border bg-surface">
           {/* AI Motion Director Prompt Section */}
           <section id="ai-motion-prompt" data-animate="true" className="border-b border-border p-4">
@@ -694,67 +681,118 @@ function Studio() {
             </button>
           </section>
 
-          {/* Spatial Coordinate Inspector Section */}
-          <section id="spatial-inspector" data-animate="true" className="border-b border-border p-4">
-            <div className="flex items-center justify-between">
-              <p className="text-[11px] uppercase tracking-[0.18em] text-muted-foreground">
-                Spatial Coordinate Inspector
-              </p>
-              <div className="flex items-center gap-1.5">
-                {/* Refresh Button */}
-                <button
-                  id="spatial-refresh"
-                  data-animate="true"
-                  type="button"
-                  onClick={updateCanvasAndSpatial}
-                  aria-label="Refresh coordinates"
-                  title="Recalculate Spatial Coordinates"
-                  className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-surface-2 text-muted-foreground hover:text-foreground transition-colors"
-                >
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M3 12a9 9 0 1 0 3-6.7" />
-                    <path d="M3 4v5h5" />
-                  </svg>
-                </button>
-
-                {/* COPY JSON BUTTON */}
-                <button
-                  id="spatial-copy-json"
-                  data-animate="true"
-                  type="button"
-                  onClick={handleCopyJSON}
-                  aria-label="Copy JSON"
-                  title="Copy Spatial JSON"
-                  className="flex h-7 px-2.5 items-center gap-1.5 rounded-md border border-border bg-surface-2 text-[11px] font-medium text-muted-foreground hover:text-foreground hover:border-primary/50 transition-colors"
-                >
-                  {copied ? (
-                    <>
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5">
-                        <polyline points="20 6 9 17 4 12" />
-                      </svg>
-                      <span className="text-green-500">Copied!</span>
-                    </>
-                  ) : (
-                    <>
-                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                      </svg>
-                      <span>Copy JSON</span>
-                    </>
-                  )}
-                </button>
-              </div>
+          {/* TABBED CONTAINER: Tab 1: Spatial JSON | Tab 2: Manual GSAP */}
+          <section id="tabbed-inspector-section" data-animate="true" className="border-b border-border p-4">
+            {/* Tab Switcher Header */}
+            <div className="flex items-center gap-1 border-b border-border pb-2 mb-3">
+              <button
+                type="button"
+                onClick={() => setActiveRightTab("spatial")}
+                className={`h-8 flex-1 rounded-lg text-[12px] font-medium transition-colors ${
+                  activeRightTab === "spatial"
+                    ? "bg-primary text-primary-foreground font-semibold"
+                    : "border border-border bg-surface-2 text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                Spatial JSON
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveRightTab("manual")}
+                className={`h-8 flex-1 rounded-lg text-[12px] font-medium transition-colors ${
+                  activeRightTab === "manual"
+                    ? "bg-primary text-primary-foreground font-semibold"
+                    : "border border-border bg-surface-2 text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                Manual GSAP
+              </button>
             </div>
 
-            {/* Selectable / Copyable JSON Pre */}
-            <pre
-              id="spatial-manifest"
-              data-animate="true"
-              className="mt-3 overflow-auto rounded-xl border border-border bg-background p-3 font-mono text-[11.5px] leading-5 text-code-str select-all cursor-text focus:outline-none max-h-48"
-            >
-              {JSON.stringify(spatialManifest, null, 2)}
-            </pre>
+            {/* TAB 1: Spatial JSON */}
+            {activeRightTab === "spatial" ? (
+              <div id="spatial-tab-content">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[10.5px] uppercase tracking-wider text-muted-foreground">
+                    DOM Coordinate Tree
+                  </span>
+                  <div className="flex items-center gap-1.5">
+                    {/* Refresh Button */}
+                    <button
+                      id="spatial-refresh"
+                      data-animate="true"
+                      type="button"
+                      onClick={updateCanvasAndSpatial}
+                      aria-label="Refresh coordinates"
+                      title="Recalculate Spatial Coordinates"
+                      className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-surface-2 text-muted-foreground hover:text-foreground transition-colors"
+                    >
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M3 12a9 9 0 1 0 3-6.7" />
+                        <path d="M3 4v5h5" />
+                      </svg>
+                    </button>
+
+                    {/* COPY JSON BUTTON */}
+                    <button
+                      id="spatial-copy-json"
+                      data-animate="true"
+                      type="button"
+                      onClick={handleCopyJSON}
+                      aria-label="Copy JSON"
+                      title="Copy Spatial JSON"
+                      className="flex h-7 px-2.5 items-center gap-1.5 rounded-md border border-border bg-surface-2 text-[11px] font-medium text-muted-foreground hover:text-foreground hover:border-primary/50 transition-colors"
+                    >
+                      {copied ? (
+                        <>
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="#22c55e" strokeWidth="2.5">
+                            <polyline points="20 6 9 17 4 12" />
+                          </svg>
+                          <span className="text-green-500">Copied!</span>
+                        </>
+                      ) : (
+                        <>
+                          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+                            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                          </svg>
+                          <span>Copy JSON</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Selectable / Copyable JSON Pre */}
+                <pre
+                  id="spatial-manifest"
+                  data-animate="true"
+                  className="overflow-auto rounded-xl border border-border bg-background p-3 font-mono text-[11.5px] leading-5 text-code-str select-all cursor-text focus:outline-none max-h-56"
+                >
+                  {JSON.stringify(spatialManifest, null, 2)}
+                </pre>
+              </div>
+            ) : (
+              /* TAB 2: Manual GSAP Code Editor */
+              <div id="manual-gsap-tab-content">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[10.5px] uppercase tracking-wider text-muted-foreground">
+                    Custom GSAP Override Code
+                  </span>
+                  <span className="text-[10px] text-primary/80 font-mono">
+                    Priority Override
+                  </span>
+                </div>
+                <textarea
+                  id="manual-code-editor"
+                  value={manualCode}
+                  onChange={(e) => setManualCode(e.target.value)}
+                  placeholder="e.g. gsap.to('#streak-icon', { y: -30, duration: 1 });"
+                  rows={6}
+                  className="w-full resize-none rounded-xl border border-border bg-background p-3 font-mono text-[12px] leading-5 text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                />
+              </div>
+            )}
           </section>
 
           {/* Render Settings & Video Export Section */}
