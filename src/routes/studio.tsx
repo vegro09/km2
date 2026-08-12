@@ -81,12 +81,38 @@ gsap.to("#streak-icon", {
 
 const DEFAULT_PROMPT = "Make the streak icon float up slightly with a gentle bounce, then scale the streak title.";
 
+type AspectRatioMode = "16:9" | "9:16" | "1:1";
+
+const ASPECT_RATIO_CONFIGS: Record<AspectRatioMode, { label: string; maxWidth: string; aspectClass: string; resolution: string }> = {
+  "16:9": {
+    label: "16:9 Desktop",
+    maxWidth: "max-w-[960px]",
+    aspectClass: "aspect-video",
+    resolution: "1920 × 1080"
+  },
+  "9:16": {
+    label: "9:16 Mobile",
+    maxWidth: "max-w-[380px]",
+    aspectClass: "aspect-[9/16]",
+    resolution: "1080 × 1920"
+  },
+  "1:1": {
+    label: "1:1 Square",
+    maxWidth: "max-w-[540px]",
+    aspectClass: "aspect-square",
+    resolution: "1080 × 1080"
+  }
+};
+
 function Studio() {
   // Left Panel States
   const [activeLeftTab, setActiveLeftTab] = useState<"code" | "dom">("code");
   const [activeCodeTab, setActiveCodeTab] = useState<"html" | "css" | "js">("html");
   const [htmlCode, setHtmlCode] = useState(DEFAULT_HTML);
   const [cssCode, setCssCode] = useState(DEFAULT_CSS);
+
+  // Viewport Aspect Ratio State
+  const [aspectRatio, setAspectRatio] = useState<AspectRatioMode>("16:9");
 
   // Right Panel States & Tabs
   const [activeRightTab, setActiveRightTab] = useState<"spatial" | "manual">("spatial");
@@ -101,6 +127,8 @@ function Studio() {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(2.0);
   const [isLooping, setIsLooping] = useState(false);
+  const [isDraggingScrubber, setIsDraggingScrubber] = useState(false);
+  const wasPlayingBeforeDrag = useRef(false);
 
   // Right Panel & Export States
   const [spatialManifest, setSpatialManifest] = useState<Record<string, any>>({});
@@ -249,7 +277,8 @@ function Studio() {
       }
     }
 
-    setDuration(tl.duration() || 2.0);
+    const totalDur = tl.duration() || 2.0;
+    setDuration(totalDur);
     timelineRef.current = tl;
     return tl;
   }, [isLooping]);
@@ -265,7 +294,7 @@ function Studio() {
 
     const gsapObj = iframeWin.gsap || gsap;
 
-    // Task 3a: Kill all running timelines and tweens in iframe
+    // 3a. Kill all running timelines and tweens in iframe scope
     if (gsapObj && gsapObj.killTweensOf) {
       gsapObj.killTweensOf("*");
     }
@@ -274,7 +303,7 @@ function Studio() {
       timelineRef.current = null;
     }
 
-    // Task 3b: Hard-reset inline CSS styles for all target elements back to default CSS baseline
+    // 3b. Hard-reset inline CSS styles for all target elements back to default CSS baseline
     if (iframeDoc.body) {
       const targets = iframeDoc.querySelectorAll('[id], [data-animate="true"], div, img, h1, h2, h3, p, span, svg');
       targets.forEach((el: any) => {
@@ -287,29 +316,33 @@ function Studio() {
 
     setManualGsapError(null);
 
-    // Task 4: Dynamic Script Injection Pipeline
+    // 4. Dynamic Script Injection Pipeline into iframe scope
     try {
-      // Remove any existing #user-motion-script tag
       const existingScript = iframeDoc.getElementById("user-motion-script");
       if (existingScript) {
         existingScript.remove();
       }
 
-      // Execute code directly inside iframeWindow scope using iframeWin.Function
-      // This ensures selector targeting (e.g. gsap.to('#streak-card', ...)) operates directly on iframe DOM
+      // Execute code directly inside iframeWindow scope
       const runInIframeScope = iframeWin.Function('gsap', 'document', 'window', manualCode);
       runInIframeScope(gsapObj, iframeDoc, iframeWin);
 
-      // Append fresh script tag into iframe body for persistence
+      // Append fresh script tag into iframe body for DOM persistence
       const newScript = iframeDoc.createElement("script");
       newScript.id = "user-motion-script";
       newScript.textContent = `/* Kanto User Motion Script */\n${manualCode}`;
       iframeDoc.body.appendChild(newScript);
 
-      // Calculate timeline duration if active tweens exist
-      const activeRoot = gsapObj.exportRoot ? gsapObj.exportRoot() : null;
-      const dur = activeRoot ? activeRoot.duration() : 2.0;
-      setDuration(dur || 2.0);
+      // Extract dynamic duration directly from active GSAP timeline instance
+      let calculatedDur = 2.0;
+      if (gsapObj && gsapObj.globalTimeline && gsapObj.globalTimeline.duration() > 0) {
+        calculatedDur = gsapObj.globalTimeline.duration();
+      } else if (gsapObj && gsapObj.exportRoot) {
+        const rootTL = gsapObj.exportRoot();
+        calculatedDur = rootTL.duration();
+      }
+      
+      setDuration(calculatedDur > 0 ? calculatedDur : 2.0);
       setIsPlaying(true);
     } catch (err: any) {
       setManualGsapError(err.message || "Syntax or Execution Error in GSAP Code");
@@ -336,7 +369,9 @@ function Studio() {
     return () => clearTimeout(timer);
   }, [manualCode, handleApplyManualMotion]);
 
-  // Handle Play/Pause button
+  // ---------------------------------------------------------------------------
+  // 4. Playback Controls & Scrubber Slider Seeking
+  // ---------------------------------------------------------------------------
   const togglePlayPause = () => {
     if (!timelineRef.current) {
       if (manualCode && manualCode.trim()) {
@@ -369,7 +404,6 @@ function Studio() {
     }
   };
 
-  // Handle Reset / Replay
   const handleReset = () => {
     if (manualCode && manualCode.trim()) {
       handleApplyManualMotion();
@@ -388,26 +422,52 @@ function Studio() {
     }
   };
 
-  // Handle Scrubber Change
-  const handleScrubberChange = (val: number) => {
-    setCurrentTime(val);
+  // Scrubber Dragging Handlers
+  const handleScrubberStart = () => {
+    wasPlayingBeforeDrag.current = isPlaying;
+    setIsDraggingScrubber(true);
     if (timelineRef.current) {
       timelineRef.current.pause();
-      timelineRef.current.time(val);
-      setIsPlaying(false);
+    } else if (iframeRef.current?.contentWindow) {
+      const win = iframeRef.current.contentWindow as any;
+      if (win.gsap?.globalTimeline) win.gsap.globalTimeline.pause();
+    }
+    setIsPlaying(false);
+  };
+
+  const handleScrubberChange = (val: number) => {
+    setCurrentTime(val);
+    const win = iframeRef.current?.contentWindow as any;
+    const gsapObj = win?.gsap;
+
+    if (timelineRef.current) {
+      timelineRef.current.seek(val);
+    } else if (gsapObj && gsapObj.globalTimeline) {
+      gsapObj.globalTimeline.seek(val);
+    }
+  };
+
+  const handleScrubberEnd = () => {
+    setIsDraggingScrubber(false);
+    if (wasPlayingBeforeDrag.current) {
+      if (timelineRef.current) {
+        timelineRef.current.play();
+      } else if (iframeRef.current?.contentWindow) {
+        const win = iframeRef.current.contentWindow as any;
+        if (win.gsap?.globalTimeline) win.gsap.globalTimeline.play();
+      }
+      setIsPlaying(true);
     }
   };
 
   // ---------------------------------------------------------------------------
-  // 4. Generate Motion Code Button (Triggers Live Preview Animation)
+  // 5. Generate Motion Code Button (Triggers Live Preview Animation)
   // ---------------------------------------------------------------------------
   const handleGenerateMotionCode = async () => {
     setIsGenerating(true);
     try {
-      // Re-initialize canvas to clean state
       updateCanvasAndSpatial();
 
-      // Call Motion Engine API for Motion Plan
       const res = await fetch("http://localhost:7007/api/generate-motion", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -428,7 +488,6 @@ function Studio() {
           setIsPlaying(true);
         }
       } else {
-        // Fallback live animation preview if server unavailable
         const tl = buildLiveAnimation();
         if (tl) {
           tl.play();
@@ -436,7 +495,6 @@ function Studio() {
         }
       }
     } catch {
-      // Fallback client-side GSAP preview if backend fetch fails
       const tl = buildLiveAnimation();
       if (tl) {
         tl.play();
@@ -448,7 +506,7 @@ function Studio() {
   };
 
   // ---------------------------------------------------------------------------
-  // 5. Render & Download Video Button (Triggers Puppeteer/FFmpeg Pipeline)
+  // 6. Render & Download Video Button
   // ---------------------------------------------------------------------------
   const handleRenderDownloadVideo = async () => {
     setIsRendering(true);
@@ -469,7 +527,6 @@ function Studio() {
         const fullUrl = `http://localhost:7007${data.videoUrl}`;
         setRenderedVideoUrl(fullUrl);
 
-        // Trigger file download
         const a = document.createElement("a");
         a.href = fullUrl;
         a.download = `kanto_motion_${Date.now()}.mp4`;
@@ -486,9 +543,6 @@ function Studio() {
     }
   };
 
-  // ---------------------------------------------------------------------------
-  // 6. Copy JSON Handler
-  // ---------------------------------------------------------------------------
   const handleCopyJSON = () => {
     const jsonStr = JSON.stringify(spatialManifest, null, 2);
     navigator.clipboard.writeText(jsonStr);
@@ -496,12 +550,13 @@ function Studio() {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // Extract DOM element list for left panel inspector
   const parsedDomElements = Object.keys(spatialManifest).map((key) => ({
     id: key,
     tag: key.startsWith("#") ? "elem" : "div",
     depth: key === "#streak-card" ? 0 : 1
   }));
+
+  const activeAspectConfig = ASPECT_RATIO_CONFIGS[aspectRatio];
 
   return (
     <div id="studio-screen" data-animate="true" className="flex h-screen flex-col bg-background select-none">
@@ -648,7 +703,6 @@ function Studio() {
                       className="flex-1 w-full resize-none border-0 bg-transparent p-3 font-mono text-[12px] leading-5 text-foreground focus:outline-none focus:ring-1 focus:ring-primary rounded-xl"
                     />
 
-                    {/* Error Badge inside Left Panel JS Editor */}
                     {manualGsapError && (
                       <div className="m-2 flex items-start gap-2 rounded-lg border border-red-500/40 bg-red-500/10 p-2 text-[11px] text-red-400">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0 mt-0.5">
@@ -699,21 +753,23 @@ function Studio() {
 
         {/* CENTER PANEL: Live DOM Canvas Viewport */}
         <main id="canvas-panel" data-animate="true" className="flex min-w-0 flex-1 flex-col bg-background">
+          {/* Top Bar Aspect Ratio Switcher */}
           <div id="canvas-toolbar" data-animate="true" className="flex h-12 items-center justify-between border-b border-border px-4">
             <div className="flex gap-1">
-              {["16:9 Desktop", "9:16 Mobile", "1:1 Square"].map((r, i) => (
+              {(["16:9", "9:16", "1:1"] as AspectRatioMode[]).map((mode) => (
                 <button
-                  key={r}
-                  id={`aspect-${r.split(" ")[0]!.replace(":", "-")}`}
+                  key={mode}
+                  id={`aspect-${mode.replace(":", "-")}`}
                   data-animate="true"
                   type="button"
-                  className={
-                    i === 0
-                      ? "h-8 rounded-lg bg-primary px-3 text-[12px] font-medium text-primary-foreground"
-                      : "h-8 rounded-lg border border-border bg-surface-2 px-3 text-[12px] text-muted-foreground"
-                  }
+                  onClick={() => setAspectRatio(mode)}
+                  className={`h-8 rounded-lg px-3 text-[12px] font-medium transition-all duration-200 ${
+                    aspectRatio === mode
+                      ? "bg-primary text-primary-foreground font-semibold shadow-md shadow-primary/20"
+                      : "border border-border bg-surface-2 text-muted-foreground hover:text-foreground"
+                  }`}
                 >
-                  {r}
+                  {ASPECT_RATIO_CONFIGS[mode].label}
                 </button>
               ))}
             </div>
@@ -724,18 +780,18 @@ function Studio() {
               <span id="canvas-zoom" data-animate="true" className="rounded-lg border border-border bg-surface-2 px-3 py-1 text-[11.5px] text-muted-foreground">
                 100%
               </span>
-              <span id="canvas-resolution" data-animate="true" className="rounded-lg border border-border bg-surface-2 px-3 py-1 text-[11.5px] text-muted-foreground">
-                1920 × 1080
+              <span id="canvas-resolution" data-animate="true" className="rounded-lg border border-border bg-surface-2 px-3 py-1 text-[11.5px] font-mono text-muted-foreground">
+                {activeAspectConfig.resolution}
               </span>
             </div>
           </div>
 
-          {/* Live DOM Preview Container (Iframe Canvas) */}
+          {/* Dynamic Viewport Container with Smooth CSS Resize Transition */}
           <div className="grid-bg flex min-h-0 flex-1 items-center justify-center overflow-auto p-8">
             <div
               id="canvas-stage"
               data-animate="true"
-              className="flex aspect-video w-full max-w-[860px] items-center justify-center rounded-2xl border border-border bg-background shadow-2xl overflow-hidden"
+              className={`flex w-full ${activeAspectConfig.maxWidth} ${activeAspectConfig.aspectClass} items-center justify-center rounded-2xl border border-border bg-background shadow-2xl overflow-hidden transition-all duration-300 ease-in-out`}
             >
               <iframe
                 ref={iframeRef}
@@ -745,7 +801,7 @@ function Studio() {
             </div>
           </div>
 
-          {/* Live GSAP Playback Controls */}
+          {/* Live GSAP Playback Controls & Real-Time Scrubber */}
           <div id="playback-control-bar" data-animate="true" className="glass flex h-14 shrink-0 items-center justify-between border-t border-border px-4">
             <div className="flex items-center gap-2">
               <button
@@ -801,19 +857,25 @@ function Studio() {
               </button>
             </div>
 
-            {/* Timeline Scrubber Input */}
+            {/* Interactive Timeline Scrubber Slider */}
             <div className="flex items-center gap-3 flex-1 max-w-xs mx-4">
               <input
+                id="timeline-scrubber"
                 type="range"
                 min={0}
                 max={duration}
                 step={0.01}
                 value={currentTime}
+                onMouseDown={handleScrubberStart}
+                onTouchStart={handleScrubberStart}
                 onChange={(e) => handleScrubberChange(parseFloat(e.target.value))}
+                onMouseUp={handleScrubberEnd}
+                onTouchEnd={handleScrubberEnd}
                 className="w-full accent-primary h-1.5 bg-surface-2 rounded-lg cursor-pointer"
               />
             </div>
 
+            {/* Dynamic Time Counter Display */}
             <span id="playback-time-counter" data-animate="true" className="rounded-lg border border-border bg-surface-2 px-3 py-1 font-mono text-[11.5px] tabular-nums text-muted-foreground">
               {currentTime.toFixed(1)}s / {duration.toFixed(1)}s
             </span>
