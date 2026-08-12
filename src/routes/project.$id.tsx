@@ -229,22 +229,31 @@ function ProjectEditor() {
       <html>
         <head>
           <style>
-            body {
+            html, body {
               margin: 0;
               padding: 0;
+              width: 100%;
+              height: 100%;
               background: ${bodyBg};
               display: flex;
               align-items: center;
               justify-content: center;
-              min-height: 100vh;
               overflow: hidden;
+            }
+            #kanto-root {
+              display: flex;
+              align-items: center;
+              justify-content: center;
+              width: 100%;
+              height: 100%;
             }
             ${cssCode}
           </style>
           <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
+          <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
         </head>
         <body>
-          ${htmlCode}
+          <div id="kanto-root">${htmlCode}</div>
         </body>
       </html>
     `;
@@ -549,34 +558,54 @@ function ProjectEditor() {
   };
 
   // ---------------------------------------------------------------------------
-  // OVERHAULED VIDEO EXPORT ENGINE: Guaranteed Deterministic Frame-by-Frame Pipeline
+  // COMPLETE OVERHAUL: Iframe-Internal html2canvas Rasterization Pipeline
+  // Root Fix: Capture GSAP inline transforms from iframe's own DOM context.
   // ---------------------------------------------------------------------------
   const handleRenderDownloadVideo = async () => {
-    const activeTL = getActiveTimeline();
-    if (!activeTL) {
-      alert("No active animation found to export.");
+    const iframe = iframeRef.current;
+    if (!iframe) {
+      setRenderError("Iframe canvas reference is not mounted.");
       return;
     }
 
-    // 1. Task 1: Pause GSAP timeline & setup status modal
+    const iframeWin = iframe.contentWindow as any;
+    const iframeDoc = iframe.contentDocument;
+    if (!iframeWin || !iframeDoc || !iframeDoc.body) {
+      setRenderError("Iframe document is not accessible. Ensure preview is loaded.");
+      return;
+    }
+
+    // Verify html2canvas is loaded in iframe scope
+    if (typeof iframeWin.html2canvas !== "function") {
+      setRenderError(
+        "html2canvas is not loaded in the canvas iframe. Please wait a moment and try again, or click 'Run JS Motion' to reload the preview."
+      );
+      return;
+    }
+
+    const activeTL = getActiveTimeline();
+    if (!activeTL) {
+      setRenderError("No active GSAP animation timeline detected. Run the animation first.");
+      return;
+    }
+
+    // ── Setup render state ────────────────────────────────────────────────────
     setIsRendering(true);
     setRenderError(null);
     setCurrentRenderFrame(0);
     setRenderProgress(0);
+    setRenderedVideoUrl(null);
 
     const wasPausedBefore = activeTL.paused();
     activeTL.pause();
     setIsPlaying(false);
 
-    try {
-      if (typeof activeTL.repeat === "function") {
-        activeTL.repeat(0);
-      }
-      if (typeof activeTL.eventCallback === "function") {
-        activeTL.eventCallback("onComplete", null);
-      }
+    // Disable looping for clean single-cycle export
+    if (typeof activeTL.repeat === "function") activeTL.repeat(0);
+    if (typeof activeTL.eventCallback === "function") activeTL.eventCallback("onComplete", null);
 
-      // Calculate exact duration & frame bounds
+    try {
+      // ── Calculate exact frame bounds ─────────────────────────────────────────
       const exactDuration = getCleanDuration(activeTL);
       const selectedFPS = framerate;
       const totalFrames = Math.max(1, Math.ceil(exactDuration * selectedFPS));
@@ -584,79 +613,154 @@ function ProjectEditor() {
       setTotalDuration(exactDuration);
       setTotalRenderFrames(totalFrames);
 
+      // Target resolution for export
       let exportWidth = 1920;
       let exportHeight = 1080;
-      if (aspectRatio === "9:16") {
-        exportWidth = 1080;
-        exportHeight = 1920;
-      } else if (aspectRatio === "1:1") {
-        exportWidth = 1080;
-        exportHeight = 1080;
-      }
+      if (aspectRatio === "9:16") { exportWidth = 1080; exportHeight = 1920; }
+      else if (aspectRatio === "1:1") { exportWidth = 1080; exportHeight = 1080; }
 
-      const canvas = document.createElement("canvas");
-      canvas.width = exportWidth;
-      canvas.height = exportHeight;
-      const ctx = canvas.getContext("2d", { alpha: true });
-      if (!ctx) {
-        throw new Error("Could not initialize offscreen 2D canvas context.");
-      }
+      // ── Output canvas for MediaRecorder ──────────────────────────────────────
+      const outputCanvas = document.createElement("canvas");
+      outputCanvas.width = exportWidth;
+      outputCanvas.height = exportHeight;
+      const ctx = outputCanvas.getContext("2d", { alpha: bgMode === "transparent" });
+      if (!ctx) throw new Error("Cannot create 2D canvas context for output.");
 
-      let mimeType = "video/mp4";
-      if (typeof MediaRecorder !== "undefined" && !MediaRecorder.isTypeSupported(mimeType)) {
-        mimeType = "video/mp4;codecs=avc1.42E01E,mp4a.40.2";
-      }
-      if (typeof MediaRecorder !== "undefined" && !MediaRecorder.isTypeSupported(mimeType)) {
-        mimeType = "video/webm;codecs=vp9";
-      }
-      if (typeof MediaRecorder !== "undefined" && !MediaRecorder.isTypeSupported(mimeType)) {
-        mimeType = "video/webm;codecs=vp8";
-      }
-      if (typeof MediaRecorder !== "undefined" && !MediaRecorder.isTypeSupported(mimeType)) {
-        mimeType = "video/webm";
-      }
+      // ── Detect best supported mimeType ────────────────────────────────────────
+      const candidateMimes = [
+        "video/webm;codecs=vp9",
+        "video/webm;codecs=vp8",
+        "video/webm",
+      ];
+      const mimeType = candidateMimes.find(
+        (m) => typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(m)
+      ) ?? "video/webm";
 
-      const stream = canvas.captureStream(0);
+      // ── Setup MediaRecorder on output canvas stream ───────────────────────────
+      const stream = outputCanvas.captureStream(0);
       const track = stream.getVideoTracks()[0] as any;
       const chunks: Blob[] = [];
-      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 12000000 });
+      const recorder = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 14_000_000 });
 
       recorder.ondataavailable = (e) => {
-        if (e.data && e.data.size > 0) {
-          chunks.push(e.data);
-        }
+        if (e.data && e.data.size > 0) chunks.push(e.data);
       };
 
-      const renderPromise = new Promise<Blob>((resolve, reject) => {
+      const recorderDone = new Promise<Blob>((resolve, reject) => {
         recorder.onstop = () => {
           if (chunks.length === 0) {
-            reject(new Error("No video data frames were recorded."));
+            reject(new Error("MediaRecorder captured 0 bytes — no frames were encoded."));
           } else {
             resolve(new Blob(chunks, { type: mimeType }));
           }
         };
-        recorder.onerror = (e: any) => {
-          reject(e.error || new Error("MediaRecorder stream capture error."));
-        };
+        recorder.onerror = (e: any) => reject(e.error ?? new Error("MediaRecorder stream error."));
       });
 
       recorder.start();
 
-      const iframeDoc = iframeRef.current?.contentDocument;
-      if (!iframeDoc || !iframeDoc.documentElement) {
-        throw new Error("Canvas viewport iframe document is not accessible.");
+      // ── Target element to rasterize ───────────────────────────────────────────
+      // CRITICAL: must be inside iframe so html2canvas sees GSAP inline transforms
+      const targetEl: HTMLElement =
+        iframeDoc.getElementById("kanto-root") ??
+        iframeDoc.querySelector("#app-viewport") ??
+        iframeDoc.body;
+
+      // ── Measure target element's natural viewport size ────────────────────────
+      const targetRect = targetEl.getBoundingClientRect();
+      const captureW = Math.max(targetRect.width || iframeWin.innerWidth || 1920, 1);
+      const captureH = Math.max(targetRect.height || iframeWin.innerHeight || 1080, 1);
+      const scaleFactor = Math.max(exportWidth / captureW, exportHeight / captureH);
+
+      // ── Wait for fonts to be ready inside iframe ──────────────────────────────
+      if (iframeDoc.fonts && typeof iframeDoc.fonts.ready?.then === "function") {
+        await iframeDoc.fonts.ready;
       }
 
-      // 2. Task 2: Deterministic Sequential Frame Loop
+      // ── html2canvas options ────────────────────────────────────────────────────
+      const h2cOptions: Record<string, any> = {
+        width: captureW,
+        height: captureH,
+        scale: scaleFactor,
+        useCORS: true,
+        allowTaint: true,
+        logging: false,
+        backgroundColor: bgMode === "transparent" ? null
+          : bgMode === "white" ? "#ffffff"
+          : customBgColor,
+        imageTimeout: 0,
+        removeContainer: true,
+        windowWidth: iframeWin.innerWidth || captureW,
+        windowHeight: iframeWin.innerHeight || captureH,
+      };
+
+      let blankFrameCount = 0;
+
+      // ── Deterministic frame-by-frame loop ─────────────────────────────────────
       for (let frame = 0; frame < totalFrames; frame++) {
+        // Step 1: Advance GSAP to exact progress position
         const progress = totalFrames === 1 ? 0 : frame / (totalFrames - 1);
         activeTL.progress(progress);
 
-        // Wait for DOM layout & font styling to settle
-        await new Promise((r) => requestAnimationFrame(r));
+        // Step 2: Double-rAF settle — wait for GSAP to flush layout recalculation
+        await new Promise<void>((r) => iframeWin.requestAnimationFrame(() => iframeWin.requestAnimationFrame(() => r())));
 
+        // Step 3: Rasterize target element inside iframe JS context
+        // html2canvas runs in iframeWin.html2canvas — sees live computed styles
+        let frameCanvas: HTMLCanvasElement | null = null;
+        try {
+          frameCanvas = await iframeWin.html2canvas(targetEl, h2cOptions);
+        } catch (captureErr: any) {
+          console.warn(`Frame ${frame}: html2canvas error — ${captureErr?.message}`);
+          // On single-frame failure, draw last valid frame or blank
+        }
+
+        // Step 4: Pixel sanity check — detect blank/all-transparent frames
+        let isValidFrame = false;
+        if (frameCanvas && frameCanvas.width > 0 && frameCanvas.height > 0) {
+          const frameCtx = frameCanvas.getContext("2d");
+          if (frameCtx) {
+
+            const pixelData = frameCtx.getImageData(
+              Math.floor(frameCanvas.width / 4),
+              Math.floor(frameCanvas.height / 4),
+              Math.min(50, frameCanvas.width),
+              Math.min(50, frameCanvas.height)
+            ).data;
+            // Check if there's any non-transparent pixel activity
+            for (let i = 3; i < pixelData.length; i += 4) {
+              if (pixelData[i] > 10) {
+                isValidFrame = true;
+                break;
+              }
+            }
+            // Also accept if background mode is set (bg pixels count)
+            if (!isValidFrame && bgMode !== "transparent") {
+              for (let i = 0; i < pixelData.length; i += 4) {
+                if (pixelData[i] > 0 || pixelData[i + 1] > 0 || pixelData[i + 2] > 0) {
+                  isValidFrame = true;
+                  break;
+                }
+              }
+            }
+          }
+        }
+
+        if (!isValidFrame) {
+          blankFrameCount++;
+          console.warn(`Frame ${frame + 1} failed pixel sanity check (blank). Blank count: ${blankFrameCount}`);
+          if (blankFrameCount > Math.ceil(totalFrames * 0.9)) {
+            throw new Error(
+              `Export aborted: ${blankFrameCount} of ${totalFrames} frames are blank. " +
+              "Ensure the animation content is visible in the preview canvas before exporting.`
+            );
+          }
+        }
+
+        // Step 5: Composite frameCanvas onto output canvas & push to MediaRecorder
         ctx.clearRect(0, 0, exportWidth, exportHeight);
 
+        // Fill background if applicable
         if (bgMode === "white") {
           ctx.fillStyle = "#ffffff";
           ctx.fillRect(0, 0, exportWidth, exportHeight);
@@ -665,70 +769,41 @@ function ProjectEditor() {
           ctx.fillRect(0, 0, exportWidth, exportHeight);
         }
 
-        const clonedBody = iframeDoc.body.cloneNode(true) as HTMLElement;
-        const styleContent = Array.from(iframeDoc.querySelectorAll("style"))
-          .map((s) => s.innerHTML)
-          .join("\n");
+        if (frameCanvas) {
+          // Center-crop scale the captured frame onto the output canvas
+          const scaleX = exportWidth / frameCanvas.width;
+          const scaleY = exportHeight / frameCanvas.height;
+          const drawScale = Math.max(scaleX, scaleY);
+          const drawW = frameCanvas.width * drawScale;
+          const drawH = frameCanvas.height * drawScale;
+          const drawX = (exportWidth - drawW) / 2;
+          const drawY = (exportHeight - drawH) / 2;
+          ctx.drawImage(frameCanvas, drawX, drawY, drawW, drawH);
+        }
 
-        const svgMarkup = `
-          <svg xmlns="http://www.w3.org/2000/svg" width="${exportWidth}" height="${exportHeight}">
-            <style>
-              body { margin:0; padding:0; background:transparent; display:flex; align-items:center; justify-content:center; min-height:100vh; overflow:hidden; }
-              ${styleContent}
-            </style>
-            <foreignObject width="100%" height="100%">
-              <div xmlns="http://www.w3.org/1999/xhtml" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;background:transparent;">
-                ${clonedBody.innerHTML}
-              </div>
-            </foreignObject>
-          </svg>
-        `;
-
-        const img = new Image();
-        const svgBlob = new Blob([svgMarkup], { type: "image/svg+xml;charset=utf-8" });
-        const svgUrl = URL.createObjectURL(svgBlob);
-
-        await new Promise<void>((resolveImg) => {
-          let timeoutId = setTimeout(() => {
-            URL.revokeObjectURL(svgUrl);
-            resolveImg();
-          }, 500);
-
-          img.onload = () => {
-            clearTimeout(timeoutId);
-            ctx.drawImage(img, 0, 0, exportWidth, exportHeight);
-            URL.revokeObjectURL(svgUrl);
-            resolveImg();
-          };
-          img.onerror = () => {
-            clearTimeout(timeoutId);
-            URL.revokeObjectURL(svgUrl);
-            resolveImg();
-          };
-          img.src = svgUrl;
-        });
-
+        // Request frame from captureStream track
         if (track && typeof track.requestFrame === "function") {
           track.requestFrame();
         }
 
+        // Step 6: Update progress UI
         const frameNum = frame + 1;
-        const pct = Math.round((frameNum / totalFrames) * 100);
         setCurrentRenderFrame(frameNum);
-        setRenderProgress(pct);
+        setRenderProgress(Math.round((frameNum / totalFrames) * 100));
 
-        // Yield for UI modal progress update
-        await new Promise((r) => setTimeout(r, 16));
+        // Yield to React so modal can repaint
+        await new Promise<void>((r) => setTimeout(r, 0));
       }
 
+      // ── Stop recorder & await final blob ─────────────────────────────────────
       recorder.stop();
+      const videoBlob = await recorderDone;
 
-      // 3. Task 3: Guaranteed File Download Mechanism
-      const videoBlob = await renderPromise;
+      // ── Guaranteed Explicit Download Mechanism ────────────────────────────────
       const downloadUrl = URL.createObjectURL(videoBlob);
-
       const titleSlug = projectTitle.trim().replace(/\s+/g, "_") || "kanto_motion";
-      const ext = exportFormat === "mp4" ? "mp4" : exportFormat;
+      // Always use .webm extension since MediaRecorder produces WebM
+      const ext = mimeType.includes("mp4") ? "mp4" : "webm";
       const fileName = `${titleSlug}_${selectedFPS}fps.${ext}`;
 
       const a = document.createElement("a");
@@ -739,20 +814,27 @@ function ProjectEditor() {
       a.click();
       document.body.removeChild(a);
 
-      setTimeout(() => URL.revokeObjectURL(downloadUrl), 10000);
+      setTimeout(() => URL.revokeObjectURL(downloadUrl), 15_000);
       setRenderedVideoUrl(downloadUrl);
+
+      if (blankFrameCount > 0) {
+        console.warn(`Export completed with ${blankFrameCount} blank frame(s) out of ${totalFrames}.`);
+      }
 
     } catch (err: any) {
       console.error("Export Failed:", err);
-      const errorMsg = err.message || "Unknown error during frame-by-frame rendering.";
-      setRenderError(errorMsg);
+      setRenderError(err.message ?? "Unknown error during frame-by-frame rendering.");
     } finally {
-      // 4. Task 4: Always restore GSAP playback & close modal
+      // Always restore state regardless of success/failure
       setIsRendering(false);
-      activeTL.progress(0);
-      if (!wasPausedBefore) {
-        activeTL.play();
-        setIsPlaying(true);
+      try {
+        activeTL.progress(0);
+        if (!wasPausedBefore) {
+          activeTL.play();
+          setIsPlaying(true);
+        }
+      } catch {
+        // ignore cleanup errors
       }
     }
   };
