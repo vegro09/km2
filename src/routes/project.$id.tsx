@@ -642,6 +642,9 @@ function ProjectEditor() {
       let exportW = 1920, exportH = 1080;
       if (aspectRatio === "9:16") { exportW = 1080; exportH = 1920; }
       else if (aspectRatio === "1:1") { exportW = 1080; exportH = 1080; }
+      // Hardware video encoders require even integer dimensions (multiples of 2)
+      exportW = Math.floor(exportW / 2) * 2;
+      exportH = Math.floor(exportH / 2) * 2;
 
       // ── Composite canvas (used for WebCodecs VideoFrame source) ────────────
       const outCanvas = document.createElement("canvas");
@@ -735,87 +738,122 @@ function ProjectEditor() {
       const hasWebCodecs = typeof (window as any).VideoEncoder === "function"
         && typeof (window as any).VideoFrame === "function";
 
-      let videoBlob: Blob;
+      let videoBlob: Blob | null = null;
 
       if (hasWebCodecs) {
-        // Detect H.264 support (→ MP4), fallback to VP9 (→ WebM)
-        let codec = "vp09.00.10.08";
-        let isMP4 = false;
         try {
-          const check = await (window as any).VideoEncoder.isConfigSupported({
-            codec: "avc1.42001E", width: exportW, height: exportH,
+          // Detect H.264 Level 4.2 support (supports up to 4K 1080p), fallback to VP9
+          let codec = "vp09.00.10.08";
+          let isMP4 = false;
+          try {
+            // avc1.64002a = H.264 High Profile Level 4.2 (supports 1080p and 4K)
+            const check = await (window as any).VideoEncoder.isConfigSupported({
+              codec: "avc1.64002a", width: exportW, height: exportH,
+            });
+            if (check.supported) {
+              codec = "avc1.64002a";
+              isMP4 = true;
+            } else {
+              // Try Baseline Level 4.2
+              const checkBase = await (window as any).VideoEncoder.isConfigSupported({
+                codec: "avc1.42002a", width: exportW, height: exportH,
+              });
+              if (checkBase.supported) {
+                codec = "avc1.42002a";
+                isMP4 = true;
+              }
+            }
+          } catch { /* fallback to VP9 */ }
+
+          const chunks: EncodedVideoChunk[] = [];
+          const metas: EncodedVideoChunkMetadata[] = [];
+          let encoderError: Error | null = null;
+
+          const enc = new (window as any).VideoEncoder({
+            output: (c: EncodedVideoChunk, m: EncodedVideoChunkMetadata) => {
+              chunks.push(c);
+              if (m) metas.push(m);
+            },
+            error: (e: Error) => {
+              console.warn("WebCodecs VideoEncoder warning:", e);
+              encoderError = e;
+            },
           });
-          if (check.supported) { codec = "avc1.42001E"; isMP4 = true; }
-        } catch { /* VP9 */ }
 
-        const chunks: EncodedVideoChunk[] = [];
-        const metas: EncodedVideoChunkMetadata[] = [];
-
-        const enc = new (window as any).VideoEncoder({
-          output: (c: EncodedVideoChunk, m: EncodedVideoChunkMetadata) => {
-            chunks.push(c); metas.push(m);
-          },
-          error: (e: Error) => { throw e; },
-        });
-
-        enc.configure({
-          codec, width: exportW, height: exportH,
-          bitrate: 10_000_000, framerate: selectedFPS,
-          hardwareAcceleration: "prefer-hardware",
-          latencyMode: "quality",
-        });
-
-        for (let i = 0; i < frames.length; i++) {
-          compositeFrame(frames[i]);
-          const vf = new (window as any).VideoFrame(outCanvas, {
-            timestamp: i * frameDurUs,
-            duration: frameDurUs,
+          enc.configure({
+            codec,
+            width: exportW,
+            height: exportH,
+            bitrate: 10_000_000,
+            framerate: selectedFPS,
+            hardwareAcceleration: "prefer-hardware",
+            latencyMode: "quality",
           });
-          enc.encode(vf, { keyFrame: i % 30 === 0 });
-          vf.close();
 
-          setCurrentRenderFrame(i + 1);
-          setRenderProgress(50 + Math.round(((i + 1) / frames.length) * 50));
-          await new Promise<void>((r) => setTimeout(r, 0));
+          for (let i = 0; i < frames.length; i++) {
+            if (encoderError || enc.state !== "configured") {
+              throw encoderError ?? new Error(`VideoEncoder transitioned to state '${enc.state}'`);
+            }
+
+            compositeFrame(frames[i]);
+            const vf = new (window as any).VideoFrame(outCanvas, {
+              timestamp: i * frameDurUs,
+              duration: frameDurUs,
+            });
+            enc.encode(vf, { keyFrame: i % 30 === 0 });
+            vf.close();
+
+            setCurrentRenderFrame(i + 1);
+            setRenderProgress(50 + Math.round(((i + 1) / frames.length) * 50));
+            await new Promise<void>((r) => setTimeout(r, 0));
+          }
+
+          if (enc.state === "configured") {
+            await enc.flush();
+            enc.close();
+
+            if (chunks.length > 0) {
+              if (isMP4) {
+                const { Muxer, ArrayBufferTarget } = await import("mp4-muxer");
+                const t = new ArrayBufferTarget();
+                const m = new Muxer({
+                  target: t,
+                  video: { codec: "avc", width: exportW, height: exportH },
+                  firstTimestampBehavior: "offset",
+                });
+                for (let i = 0; i < chunks.length; i++) m.addVideoChunk(chunks[i], metas[i]);
+                m.finalize();
+                videoBlob = new Blob([t.buffer], { type: "video/mp4" });
+              } else {
+                const { Muxer, ArrayBufferTarget } = await import("webm-muxer");
+                const t = new ArrayBufferTarget();
+                const m = new Muxer({
+                  target: t,
+                  video: { codec: "V_VP9", width: exportW, height: exportH, frameRate: selectedFPS },
+                });
+                for (let i = 0; i < chunks.length; i++) m.addVideoChunk(chunks[i], metas[i]);
+                m.finalize();
+                videoBlob = new Blob([t.buffer], { type: "video/webm" });
+              }
+            }
+          }
+        } catch (webcodecsErr) {
+          console.warn("WebCodecs encoding failed, falling back to MediaRecorder pipeline:", webcodecsErr);
+          videoBlob = null; // trigger fallback
         }
+      }
 
-        await enc.flush();
-        enc.close();
-
-        // Mux into container
-        if (isMP4) {
-          const { Muxer, ArrayBufferTarget } = await import("mp4-muxer");
-          const t = new ArrayBufferTarget();
-          const m = new Muxer({
-            target: t,
-            video: { codec: "avc", width: exportW, height: exportH },
-            firstTimestampBehavior: "offset",
-          });
-          for (let i = 0; i < chunks.length; i++) m.addVideoChunk(chunks[i], metas[i]);
-          m.finalize();
-          videoBlob = new Blob([t.buffer], { type: "video/mp4" });
-        } else {
-          const { Muxer, ArrayBufferTarget } = await import("webm-muxer");
-          const t = new ArrayBufferTarget();
-          const m = new Muxer({
-            target: t,
-            video: { codec: "V_VP9", width: exportW, height: exportH, frameRate: selectedFPS },
-          });
-          for (let i = 0; i < chunks.length; i++) m.addVideoChunk(chunks[i], metas[i]);
-          m.finalize();
-          videoBlob = new Blob([t.buffer], { type: "video/webm" });
-        }
-      } else {
-        // ── MediaRecorder fallback ─────────────────────────────────────────────
+      // ── Seamless MediaRecorder Fallback (if WebCodecs is missing or fails) ───
+      if (!videoBlob) {
         const mimes = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
-        const mime = mimes.find(m => MediaRecorder.isTypeSupported(m)) ?? "video/webm";
+        const mime = mimes.find(m => typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(m)) ?? "video/webm";
         const stream = outCanvas.captureStream(selectedFPS);
         const blobs: Blob[] = [];
         const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 10_000_000 });
         rec.ondataavailable = (e) => { if (e.data?.size > 0) blobs.push(e.data); };
         const done = new Promise<Blob>((ok, fail) => {
-          rec.onstop = () => blobs.length ? ok(new Blob(blobs, { type: mime })) : fail(new Error("No data"));
-          rec.onerror = (e: any) => fail(e.error ?? new Error("Recorder error"));
+          rec.onstop = () => blobs.length ? ok(new Blob(blobs, { type: mime })) : fail(new Error("No frame data recorded."));
+          rec.onerror = (e: any) => fail(e.error ?? new Error("MediaRecorder stream error"));
         });
         rec.start();
         const msPerFrame = 1000 / selectedFPS;
