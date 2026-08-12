@@ -70,13 +70,21 @@ function ProjectEditor() {
   // Center Canvas & Animation States
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const timelineRef = useRef<gsap.core.Timeline | null>(null);
+
+  // Production-Ready Player States
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
-  const [duration, setDuration] = useState(2.0);
+  const [totalDuration, setTotalDuration] = useState(2.0);
+  const [scrubberProgress, setScrubberProgress] = useState(0); // 0 to 100 %
   const [isLooping, setIsLooping] = useState(false);
 
-  const [, setIsDraggingScrubber] = useState(false);
-  const wasPlayingBeforeDrag = useRef(false);
+  const isLoopingRef = useRef(isLooping);
+  const wasPlayingBeforeDragRef = useRef(false);
+
+  // Keep ref synchronized with state
+  useEffect(() => {
+    isLoopingRef.current = isLooping;
+  }, [isLooping]);
 
   // Right Panel & Export States
   const [spatialManifest, setSpatialManifest] = useState<Record<string, any>>({});
@@ -97,7 +105,6 @@ function ProjectEditor() {
       setManualCode(loaded.js || DEFAULT_JS);
       if (loaded.aspectRatio) setAspectRatio(loaded.aspectRatio);
     } else {
-      // Instantiate record if newly generated
       const newProj: Project = {
         id: projectId,
         title: "Daily Streak Widget",
@@ -112,7 +119,7 @@ function ProjectEditor() {
     }
   }, [projectId]);
 
-  // Task 3: Auto-Save debounced by 500ms
+  // Auto-Save debounced by 500ms
   useEffect(() => {
     if (!projectId) return;
     const timer = setTimeout(() => {
@@ -129,7 +136,7 @@ function ProjectEditor() {
     return () => clearTimeout(timer);
   }, [projectId, projectTitle, htmlCode, cssCode, manualCode, aspectRatio]);
 
-  // Task 3: Back arrow handler forces immediate save before navigation
+  // Back arrow handler forces immediate save before navigation
   const handleBackToDashboard = () => {
     if (projectId) {
       saveProject({
@@ -155,8 +162,8 @@ function ProjectEditor() {
     return null;
   }, []);
 
-  // Helper: Extract finite single-iteration duration
-  const getCleanDuration = useCallback((tl: any) => {
+  // Helper: Extract finite single-pass duration (Never Infinity)
+  const getSinglePassDuration = useCallback((tl: any) => {
     if (!tl) return 2.0;
     const rawDur = typeof tl.duration === "function" ? tl.duration() : 2.0;
     if (typeof rawDur === "number" && isFinite(rawDur) && rawDur > 0) {
@@ -224,7 +231,7 @@ function ProjectEditor() {
     updateCanvasAndSpatial();
   }, [updateCanvasAndSpatial]);
 
-  // GSAP Animation Engine Execution
+  // GSAP Animation Engine Execution (No repeat: -1!)
   const buildLiveAnimation = useCallback((keyframeSequence?: any[]) => {
     if (!iframeRef.current) return;
     const iframeWin = iframeRef.current.contentWindow as any;
@@ -251,16 +258,24 @@ function ProjectEditor() {
       });
     }
 
+    // Task 1: Fixed Duration Engine (repeat: 0, no repeat: -1!)
     const tl = gsapObj.timeline({
       paused: false,
-      repeat: isLooping ? -1 : 0,
+      repeat: 0,
       onUpdate: () => {
-        const singleDur = getCleanDuration(tl);
-        const t = tl.time() % singleDur;
-        setCurrentTime(t);
+        // Task 2: Push real-time frame values to scrubber and counter
+        const cur = tl.time();
+        const p = tl.progress();
+        setCurrentTime(cur);
+        setScrubberProgress(p * 100);
       },
       onComplete: () => {
-        if (!isLooping) setIsPlaying(false);
+        // Task 4: Restart if loop enabled, else naturally pause at progress(1)
+        if (isLoopingRef.current) {
+          tl.restart();
+        } else {
+          setIsPlaying(false);
+        }
       }
     });
 
@@ -296,12 +311,12 @@ function ProjectEditor() {
       }
     }
 
-    const cleanDur = getCleanDuration(tl);
-    setDuration(cleanDur);
+    const singleDur = getSinglePassDuration(tl);
+    setTotalDuration(singleDur);
     timelineRef.current = tl;
     setIsPlaying(true);
     return tl;
-  }, [isLooping, getCleanDuration]);
+  }, [getSinglePassDuration]);
 
   // Dynamic JS Script Injection Pipeline
   const handleApplyManualMotion = useCallback(() => {
@@ -346,17 +361,32 @@ function ProjectEditor() {
       newScript.textContent = `/* Kanto User Motion Script */\n${manualCode}`;
       iframeDoc.body.appendChild(newScript);
 
-      let cleanDur = 2.0;
       if (gsapObj.globalTimeline) {
-        cleanDur = getCleanDuration(gsapObj.globalTimeline);
+        const globalTL = gsapObj.globalTimeline;
+        const dur = getSinglePassDuration(globalTL);
+        setTotalDuration(dur);
+
+        globalTL.eventCallback("onUpdate", () => {
+          const cur = globalTL.time();
+          const p = globalTL.progress();
+          setCurrentTime(cur);
+          setScrubberProgress(p * 100);
+        });
+
+        globalTL.eventCallback("onComplete", () => {
+          if (isLoopingRef.current) {
+            globalTL.restart();
+          } else {
+            setIsPlaying(false);
+          }
+        });
       }
       
-      setDuration(cleanDur);
       setIsPlaying(true);
     } catch (err: any) {
       setManualGsapError(err.message || "Syntax or Execution Error in GSAP Code");
     }
-  }, [manualCode, getCleanDuration]);
+  }, [manualCode, getSinglePassDuration]);
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
@@ -376,12 +406,18 @@ function ProjectEditor() {
     return () => clearTimeout(timer);
   }, [manualCode, handleApplyManualMotion]);
 
-  // Player Controls
+  // ---------------------------------------------------------------------------
+  // Task 3: Play / Pause Toggle Engine
+  // ---------------------------------------------------------------------------
   const togglePlayPause = () => {
     const activeTL = getActiveTimeline();
     if (activeTL) {
       if (activeTL.paused()) {
-        activeTL.play();
+        if (activeTL.progress() >= 0.99) {
+          activeTL.restart();
+        } else {
+          activeTL.play();
+        }
         setIsPlaying(true);
       } else {
         activeTL.pause();
@@ -396,7 +432,10 @@ function ProjectEditor() {
     }
   };
 
-  const handleReset = () => {
+  // ---------------------------------------------------------------------------
+  // Task 4: Restart & Loop Mechanics
+  // ---------------------------------------------------------------------------
+  const handleRestart = () => {
     const activeTL = getActiveTimeline();
     if (activeTL && typeof activeTL.restart === "function") {
       activeTL.restart();
@@ -412,46 +451,55 @@ function ProjectEditor() {
     }
   };
 
-  const toggleLooping = () => {
+  const toggleLoop = () => {
     const nextLoop = !isLooping;
     setIsLooping(nextLoop);
+    isLoopingRef.current = nextLoop;
+
     const activeTL = getActiveTimeline();
-    if (activeTL && typeof activeTL.repeat === "function") {
-      activeTL.repeat(nextLoop ? -1 : 0);
+    if (activeTL && typeof activeTL.eventCallback === "function") {
+      activeTL.eventCallback("onComplete", () => {
+        if (nextLoop) {
+          activeTL.restart();
+        } else {
+          setIsPlaying(false);
+        }
+      });
     }
   };
 
+  // ---------------------------------------------------------------------------
+  // Task 2: Real-Time Scrubber & Frame Sync Dragging Mechanics
+  // ---------------------------------------------------------------------------
   const handleScrubberStart = () => {
     const activeTL = getActiveTimeline();
     if (activeTL) {
-      wasPlayingBeforeDrag.current = !activeTL.paused();
+      wasPlayingBeforeDragRef.current = !activeTL.paused();
       activeTL.pause();
     } else {
-      wasPlayingBeforeDrag.current = isPlaying;
+      wasPlayingBeforeDragRef.current = isPlaying;
     }
-    setIsDraggingScrubber(true);
     setIsPlaying(false);
   };
 
-  const handleScrubberChange = (val: number) => {
-    setCurrentTime(val);
+  const handleScrubberInput = (pct: number) => {
+    setScrubberProgress(pct);
+    const normalizedProgress = Math.min(Math.max(pct / 100, 0), 1);
+    setCurrentTime(normalizedProgress * totalDuration);
+
     const activeTL = getActiveTimeline();
     if (activeTL) {
-      const cleanDur = getCleanDuration(activeTL);
-      const normalizedProgress = Math.min(Math.max(val / cleanDur, 0), 1);
-      
       if (typeof activeTL.progress === "function") {
         activeTL.progress(normalizedProgress);
       } else if (typeof activeTL.seek === "function") {
-        activeTL.seek(val);
+        activeTL.seek(normalizedProgress * totalDuration);
       }
     }
   };
 
   const handleScrubberEnd = () => {
-    setIsDraggingScrubber(false);
     const activeTL = getActiveTimeline();
-    if (wasPlayingBeforeDrag.current && activeTL) {
+    if (wasPlayingBeforeDragRef.current && activeTL) {
       activeTL.play();
       setIsPlaying(true);
     }
@@ -760,50 +808,59 @@ function ProjectEditor() {
             </div>
           </div>
 
-          {/* Live GSAP Playback Controls */}
+          {/* BRAND-NEW PRODUCTION-READY TIMELINE CONTROLLER */}
           <div id="playback-control-bar" data-animate="true" className="glass flex h-14 shrink-0 items-center justify-between border-t border-border px-4">
+            {/* Playback Controls (Play/Pause, Restart, Loop) */}
             <div className="flex items-center gap-2">
+              {/* 1. Play / Pause Toggle Button */}
               <button
                 id="playback-play-pause"
                 data-animate="true"
                 type="button"
                 onClick={togglePlayPause}
-                aria-label="Play / Pause"
-                className="flex h-10 w-10 items-center justify-center rounded-full bg-primary text-primary-foreground hover:opacity-90 transition-opacity"
+                aria-label={isPlaying ? "Pause" : "Play"}
+                title={isPlaying ? "Pause Timeline" : "Play Timeline"}
+                className="flex h-10 w-10 items-center justify-center rounded-full bg-primary text-primary-foreground hover:opacity-90 transition-opacity shadow-md shadow-primary/20"
               >
                 {isPlaying ? (
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
-                    <rect x="6" y="4" width="4" height="16" />
-                    <rect x="14" y="4" width="4" height="16" />
+                    <rect x="6" y="4" width="4" height="16" rx="1" />
+                    <rect x="14" y="4" width="4" height="16" rx="1" />
                   </svg>
                 ) : (
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" className="ml-0.5">
                     <path d="M8 5v14l11-7z" />
                   </svg>
                 )}
               </button>
+
+              {/* 2. Restart Button (↻) */}
               <button
-                id="playback-reset"
+                id="playback-restart"
                 data-animate="true"
                 type="button"
-                onClick={handleReset}
-                aria-label="Reset / Replay"
-                className="flex h-9 w-9 items-center justify-center rounded-lg border border-border bg-surface-2 text-muted-foreground hover:text-foreground transition-colors"
+                onClick={handleRestart}
+                aria-label="Restart Timeline"
+                title="Restart Timeline (↻)"
+                className="flex h-9 w-9 items-center justify-center rounded-lg border border-border bg-surface-2 text-muted-foreground hover:text-foreground hover:border-primary/40 transition-colors"
               >
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M3 12a9 9 0 1 0 3-6.7" />
                   <path d="M3 4v5h5" />
                 </svg>
               </button>
+
+              {/* 3. Loop Toggle Button (🔁) */}
               <button
                 id="playback-loop"
                 data-animate="true"
                 type="button"
-                onClick={toggleLooping}
-                aria-label="Loop"
+                onClick={toggleLoop}
+                aria-label="Toggle Loop"
+                title={isLooping ? "Loop Enabled (Auto-Restart)" : "Loop Disabled"}
                 className={`flex h-9 w-9 items-center justify-center rounded-lg border transition-colors ${
-                  isLooping 
-                    ? "border-primary bg-primary/20 text-primary" 
+                  isLooping
+                    ? "border-primary bg-primary/20 text-primary font-bold shadow-sm shadow-primary/20"
                     : "border-border bg-surface-2 text-muted-foreground hover:text-foreground"
                 }`}
               >
@@ -816,26 +873,34 @@ function ProjectEditor() {
               </button>
             </div>
 
-            <div className="flex items-center gap-3 flex-1 max-w-xs mx-4">
+            {/* Real-Time Frame Sync Scrubber Slider (0 to 100%) */}
+            <div className="flex items-center gap-3 flex-1 max-w-sm mx-6">
               <input
                 id="timeline-scrubber"
                 type="range"
                 min={0}
-                max={duration}
-                step={0.01}
-                value={currentTime}
+                max={100}
+                step={0.1}
+                value={scrubberProgress}
                 onMouseDown={handleScrubberStart}
                 onTouchStart={handleScrubberStart}
-                onChange={(e) => handleScrubberChange(parseFloat(e.target.value))}
+                onChange={(e) => handleScrubberInput(parseFloat(e.target.value))}
                 onMouseUp={handleScrubberEnd}
                 onTouchEnd={handleScrubberEnd}
-                className="w-full accent-primary h-1.5 bg-surface-2 rounded-lg cursor-pointer"
+                className="w-full accent-primary h-2 bg-surface-2 rounded-lg cursor-pointer"
               />
             </div>
 
-            <span id="playback-time-counter" data-animate="true" className="rounded-lg border border-border bg-surface-2 px-3 py-1 font-mono text-[11.5px] tabular-nums text-muted-foreground">
-              {currentTime.toFixed(1)}s / {duration.toFixed(1)}s
-            </span>
+            {/* Fixed Duration Counter Display (${currentTime.toFixed(1)}s / ${totalDuration.toFixed(1)}s) */}
+            <div className="flex items-center gap-2">
+              <span
+                id="playback-time-counter"
+                data-animate="true"
+                className="rounded-lg border border-border bg-surface-2 px-3 py-1 font-mono text-[11.5px] tabular-nums text-muted-foreground"
+              >
+                {currentTime.toFixed(1)}s / {totalDuration.toFixed(1)}s
+              </span>
+            </div>
           </div>
         </main>
 
