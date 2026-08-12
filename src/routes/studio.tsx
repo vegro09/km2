@@ -112,7 +112,7 @@ function Studio() {
   const [renderedVideoUrl, setRenderedVideoUrl] = useState<string | null>(null);
 
   // ---------------------------------------------------------------------------
-  // 1. Live Canvas DOM Injection & Spatial Manifest Extraction
+  // 1. Live Canvas DOM Injection & GSAP Auto-Injection into Iframe
   // ---------------------------------------------------------------------------
   const updateCanvasAndSpatial = useCallback(() => {
     if (!iframeRef.current) return;
@@ -136,6 +136,7 @@ function Studio() {
             }
             ${cssCode}
           </style>
+          <!-- GSAP Auto-Injection into Canvas Iframe Head -->
           <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
         </head>
         <body>
@@ -174,7 +175,7 @@ function Studio() {
   }, [updateCanvasAndSpatial]);
 
   // ---------------------------------------------------------------------------
-  // 2. Client-Side Live GSAP Animation Preview
+  // 2. Client-Side Live GSAP Animation Preview Engine
   // ---------------------------------------------------------------------------
   const buildLiveAnimation = useCallback((keyframeSequence?: any[]) => {
     if (!iframeRef.current) return;
@@ -184,17 +185,23 @@ function Studio() {
 
     const gsapObj = iframeWin.gsap || gsap;
 
-    // Reset previous timeline & inline styles to clean baseline
+    // Terminate all running timelines and tweens in iframe scope
+    if (gsapObj && gsapObj.killTweensOf) {
+      gsapObj.killTweensOf("*");
+    }
     if (timelineRef.current) {
       timelineRef.current.kill();
+      timelineRef.current = null;
     }
 
+    // Hard-reset inline CSS styles for all target elements back to default CSS state
     if (iframeDoc.body) {
-      const targets = iframeDoc.querySelectorAll('[id], [data-animate="true"]');
+      const targets = iframeDoc.querySelectorAll('[id], [data-animate="true"], div, img, h1, h2, h3, p, span, svg');
       targets.forEach((el: any) => {
         if (gsapObj && gsapObj.set) {
           gsapObj.set(el, { clearProps: "all" });
         }
+        el.removeAttribute("style");
       });
     }
 
@@ -248,7 +255,7 @@ function Studio() {
   }, [isLooping]);
 
   // ---------------------------------------------------------------------------
-  // 3. Apply Manual Motion Direct Execution Handler (With DOM Style Reset)
+  // 3. Dynamic Script Injection Pipeline & Iframe Scope Execution Engine
   // ---------------------------------------------------------------------------
   const handleApplyManualMotion = useCallback(() => {
     if (!iframeRef.current) return;
@@ -258,46 +265,67 @@ function Studio() {
 
     const gsapObj = iframeWin.gsap || gsap;
 
-    // Reset previous timeline
+    // Task 3a: Kill all running timelines and tweens in iframe
+    if (gsapObj && gsapObj.killTweensOf) {
+      gsapObj.killTweensOf("*");
+    }
     if (timelineRef.current) {
       timelineRef.current.kill();
+      timelineRef.current = null;
     }
 
-    // Reset target elements inline styles to clean baseline before animation
+    // Task 3b: Hard-reset inline CSS styles for all target elements back to default CSS baseline
     if (iframeDoc.body) {
-      const targets = iframeDoc.querySelectorAll('[id], [data-animate="true"]');
+      const targets = iframeDoc.querySelectorAll('[id], [data-animate="true"], div, img, h1, h2, h3, p, span, svg');
       targets.forEach((el: any) => {
         if (gsapObj && gsapObj.set) {
           gsapObj.set(el, { clearProps: "all" });
         }
+        el.removeAttribute("style");
       });
     }
 
     setManualGsapError(null);
 
+    // Task 4: Dynamic Script Injection Pipeline
     try {
-      const tl = gsapObj.timeline({
-        repeat: isLooping ? -1 : 0,
-        onUpdate: () => {
-          setCurrentTime(tl.time());
-        },
-        onComplete: () => {
-          if (!isLooping) setIsPlaying(false);
-        }
-      });
+      // Remove any existing #user-motion-script tag
+      const existingScript = iframeDoc.getElementById("user-motion-script");
+      if (existingScript) {
+        existingScript.remove();
+      }
 
-      // Evaluate user JS script passing gsap, timeline, and document context
-      const runUserGsap = new Function('gsap', 'tl', 'document', manualCode);
-      runUserGsap(gsapObj, tl, iframeDoc);
+      // Execute code directly inside iframeWindow scope using iframeWin.Function
+      // This ensures selector targeting (e.g. gsap.to('#streak-card', ...)) operates directly on iframe DOM
+      const runInIframeScope = iframeWin.Function('gsap', 'document', 'window', manualCode);
+      runInIframeScope(gsapObj, iframeDoc, iframeWin);
 
-      setDuration(tl.duration() || 2.0);
-      timelineRef.current = tl;
-      tl.play();
+      // Append fresh script tag into iframe body for persistence
+      const newScript = iframeDoc.createElement("script");
+      newScript.id = "user-motion-script";
+      newScript.textContent = `/* Kanto User Motion Script */\n${manualCode}`;
+      iframeDoc.body.appendChild(newScript);
+
+      // Calculate timeline duration if active tweens exist
+      const activeRoot = gsapObj.exportRoot ? gsapObj.exportRoot() : null;
+      const dur = activeRoot ? activeRoot.duration() : 2.0;
+      setDuration(dur || 2.0);
       setIsPlaying(true);
     } catch (err: any) {
       setManualGsapError(err.message || "Syntax or Execution Error in GSAP Code");
     }
-  }, [manualCode, isLooping]);
+  }, [manualCode]);
+
+  // Listen for iframe scope errors via postMessage fallback
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      if (event.data && event.data.type === "KANTO_GSAP_ERROR") {
+        setManualGsapError(event.data.message);
+      }
+    };
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
+  }, []);
 
   // Auto-execute JS animation live when manualCode changes (debounced)
   useEffect(() => {
@@ -619,6 +647,19 @@ function Studio() {
                       placeholder="Enter GSAP animation script here..."
                       className="flex-1 w-full resize-none border-0 bg-transparent p-3 font-mono text-[12px] leading-5 text-foreground focus:outline-none focus:ring-1 focus:ring-primary rounded-xl"
                     />
+
+                    {/* Error Badge inside Left Panel JS Editor */}
+                    {manualGsapError && (
+                      <div className="m-2 flex items-start gap-2 rounded-lg border border-red-500/40 bg-red-500/10 p-2 text-[11px] text-red-400">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0 mt-0.5">
+                          <circle cx="12" cy="12" r="10" />
+                          <line x1="12" y1="8" x2="12" y2="12" />
+                          <line x1="12" y1="16" x2="12.01" y2="16" />
+                        </svg>
+                        <span className="font-mono text-[10.5px] leading-3.5 break-all">{manualGsapError}</span>
+                      </div>
+                    )}
+
                     <div className="p-2 border-t border-border bg-surface-2/50 rounded-b-xl flex items-center justify-between">
                       <span className="text-[10px] font-mono text-muted-foreground">
                         GSAP v3.12 Live Engine
