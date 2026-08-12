@@ -8,7 +8,7 @@ import { generateMotionPlan } from './src/aiDirector.js';
 import { renderVideo } from './src/renderer.js';
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const PORT = process.env.PORT || 7007;
 
 // Middleware configuration - accept CORS requests from local frontend development servers
 app.use(cors({ origin: '*' }));

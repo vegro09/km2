@@ -286,7 +286,7 @@ function Studio() {
       updateCanvasAndSpatial();
 
       // Call Motion Engine API for Motion Plan
-      const res = await fetch("http://localhost:3001/api/generate-motion", {
+      const res = await fetch("http://localhost:7007/api/generate-motion", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -331,7 +331,7 @@ function Studio() {
   const handleRenderDownloadVideo = async () => {
     setIsRendering(true);
     try {
-      const res = await fetch("http://localhost:3001/api/generate-motion", {
+      const res = await fetch("http://localhost:7007/api/generate-motion", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -344,7 +344,7 @@ function Studio() {
 
       const data = await res.json();
       if (data.success && data.videoUrl) {
-        const fullUrl = `http://localhost:3001${data.videoUrl}`;
+        const fullUrl = `http://localhost:7007${data.videoUrl}`;
         setRenderedVideoUrl(fullUrl);
 
         // Trigger file download
