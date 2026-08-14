@@ -95,7 +95,8 @@ function ProjectEditor() {
   const [spatialManifest, setSpatialManifest] = useState<Record<string, any>>({});
   const [copied, setCopied] = useState(false);
   const [framerate, setFramerate] = useState<30 | 60>(30);
-  const [exportFormat, setExportFormat] = useState<"mp4" | "webm" | "lottie">("mp4");
+  type ExportFormat = "mp4" | "webm" | "prores" | "png-sequence";
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("mp4");
 
   const [isRendering, setIsRendering] = useState(false);
   const [renderError, setRenderError] = useState<string | null>(null);
@@ -250,7 +251,6 @@ function ProjectEditor() {
             ${cssCode}
           </style>
           <script src="https://cdnjs.cloudflare.com/ajax/libs/gsap/3.12.2/gsap.min.js"></script>
-          <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
         </head>
         <body>
           <div id="kanto-root">${htmlCode}</div>
@@ -564,335 +564,88 @@ function ProjectEditor() {
   };
 
   // ---------------------------------------------------------------------------
-  // REBUILT EXPORT ENGINE — Uses time() NOT progress() for timeline seeking.
-  //
-  // ROOT CAUSE of slideshow bug:
-  //   globalTimeline.duration() ≈ 10,000,000,000 (GSAP sentinel).
-  //   progress(0.5) = seeking to 5 billion seconds = every frame at end state.
-  //   time(2.75) = correctly seeks to 2.75 seconds on ANY timeline.
-  //
-  // WebCodecs VideoEncoder + mp4-muxer for explicit per-frame timestamps.
+  // MODERN HEADLESS BROWSER & FFMPEG RENDERING PIPELINE
+  // Renders deterministic, frame-accurate video via Puppeteer + FFmpeg backend
+  // Supports MP4, WebM (Alpha Transparency), ProRes 4444, and PNG Sequence ZIP
   // ---------------------------------------------------------------------------
   const handleRenderDownloadVideo = async () => {
-    const iframe = iframeRef.current;
-    if (!iframe) { setRenderError("Iframe not mounted."); return; }
-
-    const iframeWin = iframe.contentWindow as any;
-    const iframeDoc = iframe.contentDocument;
-    if (!iframeWin || !iframeDoc || !iframeDoc.body) {
-      setRenderError("Iframe document not accessible.");
-      return;
-    }
-
-    if (typeof iframeWin.html2canvas !== "function") {
-      setRenderError("html2canvas not loaded yet. Wait a moment and try again.");
-      return;
-    }
-
-    // Get the GSAP instance from the iframe
-    const gsapInst = iframeWin.gsap;
-    if (!gsapInst) {
-      setRenderError("GSAP not found in iframe. Run the animation first.");
-      return;
-    }
-
-    // ── Determine what to seek: prefer timelineRef, else globalTimeline ──────
-    const userTL = timelineRef.current;         // user-created timeline (buildLiveAnimation)
-    const globalTL = gsapInst.globalTimeline;    // fallback: all gsap.to() calls
-
-    const seekTarget = userTL ?? globalTL;       // what we'll call .time() on
-    if (!seekTarget) {
-      setRenderError("No animation timeline found. Run the animation first.");
-      return;
-    }
-
-    // ── Compute the REAL animation duration (not globalTimeline's 10B) ────────
-    const exactDuration = getCleanDuration(seekTarget);
-    if (exactDuration <= 0 || !isFinite(exactDuration)) {
-      setRenderError(`Invalid animation duration: ${exactDuration}s. Ensure your animation has visible tweens.`);
-      return;
-    }
-
-    // ── Setup UI state ───────────────────────────────────────────────────────
     setIsRendering(true);
     setRenderError(null);
+    setRenderProgress(10);
     setCurrentRenderFrame(0);
-    setRenderProgress(0);
-    setRenderedVideoUrl(null);
-
-    const wasPaused = seekTarget.paused?.() ?? false;
-    seekTarget.pause();
-    setIsPlaying(false);
-
-    // Disable repeat/looping during export
-    if (typeof seekTarget.repeat === "function") seekTarget.repeat(0);
-    if (typeof seekTarget.eventCallback === "function") {
-      seekTarget.eventCallback("onComplete", null);
-      seekTarget.eventCallback("onUpdate", null);
-    }
-
-    const selectedFPS = framerate;
-    const totalFrames = Math.max(1, Math.ceil(exactDuration * selectedFPS));
-
-    setTotalDuration(exactDuration);
-    setTotalRenderFrames(totalFrames);
+    const estimatedFrames = Math.max(1, Math.ceil((totalDuration || 2) * framerate));
+    setTotalRenderFrames(estimatedFrames);
 
     try {
-      // ── Resolution ─────────────────────────────────────────────────────────
-      let exportW = 1920, exportH = 1080;
-      if (aspectRatio === "9:16") { exportW = 1080; exportH = 1920; }
-      else if (aspectRatio === "1:1") { exportW = 1080; exportH = 1080; }
-      // Hardware video encoders require even integer dimensions (multiples of 2)
-      exportW = Math.floor(exportW / 2) * 2;
-      exportH = Math.floor(exportH / 2) * 2;
+      // Calculate target resolution
+      let renderWidth = 1920;
+      let renderHeight = 1080;
+      if (aspectRatio === "9:16") {
+        renderWidth = 1080;
+        renderHeight = 1920;
+      } else if (aspectRatio === "1:1") {
+        renderWidth = 1080;
+        renderHeight = 1080;
+      }
 
-      // ── Composite canvas (GPU-accelerated context backed by hardware texture) ────
-      const outCanvas = document.createElement("canvas");
-      outCanvas.width = exportW;
-      outCanvas.height = exportH;
-      const ctx = outCanvas.getContext("2d", { willReadFrequently: false, alpha: bgMode === "transparent" })!;
+      setRenderProgress(25);
 
-      // ── Target element inside iframe (force GPU layer compositing) ──────────────
-      const targetEl: HTMLElement =
-        (iframeDoc.getElementById("kanto-root") as HTMLElement) ??
-        (iframeDoc.querySelector("#app-viewport") as HTMLElement) ??
-        iframeDoc.body;
-
-      // Force GPU layer hardware acceleration on iframe root container
-      targetEl.style.transform = targetEl.style.transform || "translateZ(0)";
-      targetEl.style.willChange = "transform";
-
-      const viewW = Math.max(iframeWin.innerWidth || targetEl.offsetWidth || exportW, 1);
-      const viewH = Math.max(iframeWin.innerHeight || targetEl.offsetHeight || exportH, 1);
-      const scale = Math.max(exportW / viewW, exportH / viewH);
-
-      if (iframeDoc.fonts?.ready) await iframeDoc.fonts.ready;
-
-      const h2cOpts: Record<string, unknown> = {
-        width: viewW, height: viewH, scale,
-        useCORS: true, allowTaint: true, logging: false,
-        backgroundColor: bgMode === "transparent" ? null : bgMode === "white" ? "#ffffff" : customBgColor,
-        imageTimeout: 0, removeContainer: true,
-        windowWidth: viewW, windowHeight: viewH,
+      const API_BASE = "http://localhost:7007";
+      const payload = {
+        html: htmlCode,
+        css: cssCode,
+        js: manualCode,
+        width: renderWidth,
+        height: renderHeight,
+        fps: framerate,
+        duration: totalDuration > 0 ? totalDuration : undefined,
+        format: exportFormat,
+        transparent: bgMode === "transparent",
+        backgroundColor: bgMode === "white" ? "#ffffff" : bgMode === "custom" ? customBgColor : "#ffffff",
+        filename: projectTitle.trim().replace(/[^a-zA-Z0-9_-]/g, "_") || "kanto_motion"
       };
 
-      // ── Helper: draw captured frame to output canvas with GPU composite ─────
-      const compositeFrame = (fc: HTMLCanvasElement) => {
-        ctx.clearRect(0, 0, exportW, exportH);
-        if (bgMode === "white") { ctx.fillStyle = "#fff"; ctx.fillRect(0, 0, exportW, exportH); }
-        else if (bgMode === "custom") { ctx.fillStyle = customBgColor; ctx.fillRect(0, 0, exportW, exportH); }
-        const s = Math.max(exportW / fc.width, exportH / fc.height);
-        const w = fc.width * s, h = fc.height * s;
-        ctx.drawImage(fc, (exportW - w) / 2, (exportH - h) / 2, w, h);
-      };
+      setRenderProgress(45);
 
-      // ════════════════════════════════════════════════════════════════════════
-      // PHASE 1 — GPU-Accelerated Frame Capture
-      // ════════════════════════════════════════════════════════════════════════
-      const frames: HTMLCanvasElement[] = [];
+      const response = await fetch(`${API_BASE}/api/render-video`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
 
-      // Reset to start
-      seekTarget.time(0);
-      await new Promise<void>((r) =>
-        iframeWin.requestAnimationFrame(() => iframeWin.requestAnimationFrame(r))
-      );
-
-      for (let i = 0; i < totalFrames; i++) {
-        const targetTime = (i / (totalFrames - 1 || 1)) * exactDuration;
-        seekTarget.time(targetTime);
-
-        // Double-rAF: GPU flushes transforms → browser repaints → capture frame
-        await new Promise<void>((r) =>
-          iframeWin.requestAnimationFrame(() => iframeWin.requestAnimationFrame(r))
-        );
-
-        let fc: HTMLCanvasElement | null = null;
-        try {
-          fc = await iframeWin.html2canvas(targetEl, h2cOpts);
-        } catch {
-          // capture error — use blank
-        }
-
-        if (fc && fc.width > 0 && fc.height > 0) {
-          frames.push(fc);
-        } else {
-          const blank = document.createElement("canvas");
-          blank.width = exportW; blank.height = exportH;
-          const bc = blank.getContext("2d", { willReadFrequently: false });
-          if (bc && bgMode === "white") { bc.fillStyle = "#fff"; bc.fillRect(0, 0, exportW, exportH); }
-          frames.push(blank);
-        }
-
-        setCurrentRenderFrame(i + 1);
-        setRenderProgress(Math.round(((i + 1) / totalFrames) * 50));
-        await new Promise<void>((r) => setTimeout(r, 0));
+      if (!response.ok) {
+        const errJson = await response.json().catch(() => ({}));
+        throw new Error(errJson.error || `Server returned error status ${response.status}`);
       }
 
-      // ════════════════════════════════════════════════════════════════════════
-      // PHASE 2 — GPU Hardware-Accelerated Video Encoding (NVENC/VCE/QuickSync)
-      // ════════════════════════════════════════════════════════════════════════
-      const frameDurUs = Math.round(1_000_000 / selectedFPS);
-      const hasWebCodecs = typeof (window as any).VideoEncoder === "function"
-        && typeof (window as any).VideoFrame === "function";
+      setRenderProgress(85);
+      const data = await response.json();
 
-      let videoBlob: Blob | null = null;
-
-      if (hasWebCodecs) {
-        try {
-          // Check GPU hardware acceleration support for H.264 / VP9
-          let codec = "vp09.00.10.08";
-          let isMP4 = false;
-          try {
-            const check = await (window as any).VideoEncoder.isConfigSupported({
-              codec: "avc1.64002a",
-              width: exportW,
-              height: exportH,
-              hardwareAcceleration: "prefer-hardware",
-            });
-            if (check.supported) {
-              codec = "avc1.64002a";
-              isMP4 = true;
-            } else {
-              const checkBase = await (window as any).VideoEncoder.isConfigSupported({
-                codec: "avc1.42002a",
-                width: exportW,
-                height: exportH,
-                hardwareAcceleration: "prefer-hardware",
-              });
-              if (checkBase.supported) {
-                codec = "avc1.42002a";
-                isMP4 = true;
-              }
-            }
-          } catch { /* fallback to VP9 */ }
-
-          const chunks: EncodedVideoChunk[] = [];
-          const metas: EncodedVideoChunkMetadata[] = [];
-          let encoderError: Error | null = null;
-
-          const enc = new (window as any).VideoEncoder({
-            output: (c: EncodedVideoChunk, m: EncodedVideoChunkMetadata) => {
-              chunks.push(c);
-              if (m) metas.push(m);
-            },
-            error: (e: Error) => {
-              console.warn("WebCodecs VideoEncoder warning:", e);
-              encoderError = e;
-            },
-          });
-
-          // Configure for direct GPU Hardware Acceleration (NVENC / Intel QuickSync / AMD VCE)
-          enc.configure({
-            codec,
-            width: exportW,
-            height: exportH,
-            bitrate: 12_000_000,
-            framerate: selectedFPS,
-            hardwareAcceleration: "prefer-hardware",
-            latencyMode: "quality",
-          });
-
-          for (let i = 0; i < frames.length; i++) {
-            if (encoderError || enc.state !== "configured") {
-              throw encoderError ?? new Error(`VideoEncoder transitioned to state '${enc.state}'`);
-            }
-
-            compositeFrame(frames[i]);
-            const vf = new (window as any).VideoFrame(outCanvas, {
-              timestamp: i * frameDurUs,
-              duration: frameDurUs,
-            });
-            enc.encode(vf, { keyFrame: i % 30 === 0 });
-            vf.close();
-
-            setCurrentRenderFrame(i + 1);
-            setRenderProgress(50 + Math.round(((i + 1) / frames.length) * 50));
-            await new Promise<void>((r) => setTimeout(r, 0));
-          }
-
-          if (enc.state === "configured") {
-            await enc.flush();
-            enc.close();
-
-            if (chunks.length > 0) {
-              if (isMP4) {
-                const { Muxer, ArrayBufferTarget } = await import("mp4-muxer");
-                const t = new ArrayBufferTarget();
-                const m = new Muxer({
-                  target: t,
-                  video: { codec: "avc", width: exportW, height: exportH },
-                  firstTimestampBehavior: "offset",
-                });
-                for (let i = 0; i < chunks.length; i++) m.addVideoChunk(chunks[i], metas[i]);
-                m.finalize();
-                videoBlob = new Blob([t.buffer], { type: "video/mp4" });
-              } else {
-                const { Muxer, ArrayBufferTarget } = await import("webm-muxer");
-                const t = new ArrayBufferTarget();
-                const m = new Muxer({
-                  target: t,
-                  video: { codec: "V_VP9", width: exportW, height: exportH, frameRate: selectedFPS },
-                });
-                for (let i = 0; i < chunks.length; i++) m.addVideoChunk(chunks[i], metas[i]);
-                m.finalize();
-                videoBlob = new Blob([t.buffer], { type: "video/webm" });
-              }
-            }
-          }
-        } catch (webcodecsErr) {
-          console.warn("WebCodecs encoding failed, falling back to MediaRecorder pipeline:", webcodecsErr);
-          videoBlob = null; // trigger fallback
-        }
+      if (!data.success) {
+        throw new Error(data.error || "Rendering pipeline failed to compile media file.");
       }
 
-      // ── Seamless MediaRecorder Fallback (if WebCodecs is missing or fails) ───
-      if (!videoBlob) {
-        const mimes = ["video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"];
-        const mime = mimes.find(m => typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(m)) ?? "video/webm";
-        const stream = outCanvas.captureStream(selectedFPS);
-        const blobs: Blob[] = [];
-        const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 10_000_000 });
-        rec.ondataavailable = (e) => { if (e.data?.size > 0) blobs.push(e.data); };
-        const done = new Promise<Blob>((ok, fail) => {
-          rec.onstop = () => blobs.length ? ok(new Blob(blobs, { type: mime })) : fail(new Error("No frame data recorded."));
-          rec.onerror = (e: any) => fail(e.error ?? new Error("MediaRecorder stream error"));
-        });
-        rec.start();
-        const msPerFrame = 1000 / selectedFPS;
-        for (let i = 0; i < frames.length; i++) {
-          compositeFrame(frames[i]);
-          await new Promise<void>((r) => setTimeout(r, msPerFrame));
-          setCurrentRenderFrame(i + 1);
-          setRenderProgress(50 + Math.round(((i + 1) / frames.length) * 50));
-        }
-        rec.stop();
-        videoBlob = await done;
-      }
+      setRenderProgress(100);
+      setCurrentRenderFrame(data.totalFrames || estimatedFrames);
+      setTotalRenderFrames(data.totalFrames || estimatedFrames);
 
-      // ── Download ───────────────────────────────────────────────────────────
-      const url = URL.createObjectURL(videoBlob);
-      const slug = projectTitle.trim().replace(/\s+/g, "_") || "kanto_motion";
-      const ext = videoBlob.type.includes("mp4") ? "mp4" : "webm";
+      const downloadFullUrl = `${API_BASE}${data.downloadUrl || data.videoUrl}`;
+      setRenderedVideoUrl(downloadFullUrl);
 
+      // Trigger automatic browser download
       const a = document.createElement("a");
-      a.href = url;
-      a.download = `${slug}_${selectedFPS}fps.${ext}`;
-      a.style.display = "none";
+      a.href = downloadFullUrl;
+      a.download = data.fileName || `${payload.filename}_${framerate}fps.${exportFormat === "prores" ? "mov" : exportFormat === "png-sequence" ? "zip" : exportFormat}`;
+      a.target = "_blank";
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      setTimeout(() => URL.revokeObjectURL(url), 15_000);
-      setRenderedVideoUrl(url);
 
     } catch (err: any) {
-      console.error("Export failed:", err);
-      setRenderError(err.message ?? "Unknown export error.");
+      console.error("Export Failed:", err);
+      setRenderError(err.message || "Failed to render video with backend engine.");
     } finally {
       setIsRendering(false);
-      try {
-        seekTarget.time(0);
-        if (!wasPaused) { seekTarget.play(); setIsPlaying(true); }
-      } catch { /* ignore */ }
     }
   };
 
@@ -1530,20 +1283,25 @@ function ProjectEditor() {
               <p className="text-[10.5px] font-medium uppercase tracking-wider text-muted-foreground mb-2">
                 Export Format
               </p>
-              <div className="grid grid-cols-3 gap-2">
-                {(["mp4", "webm", "lottie"] as const).map((fmt) => (
+              <div className="grid grid-cols-2 gap-2">
+                {[
+                  { id: "mp4" as const, label: "MP4 (H.264)" },
+                  { id: "webm" as const, label: "WebM (Alpha)" },
+                  { id: "prores" as const, label: "ProRes 4444" },
+                  { id: "png-sequence" as const, label: "PNG Sequence" }
+                ].map(({ id, label }) => (
                   <button
-                    key={fmt}
-                    id={`fmt-${fmt}`}
+                    key={id}
+                    id={`fmt-${id}`}
                     type="button"
-                    onClick={() => setExportFormat(fmt)}
-                    className={`h-9 rounded-lg text-[12px] font-medium uppercase transition-colors ${
-                      exportFormat === fmt
-                        ? "bg-primary text-primary-foreground font-semibold"
+                    onClick={() => setExportFormat(id)}
+                    className={`h-9 rounded-lg text-[11.5px] font-medium transition-colors ${
+                      exportFormat === id
+                        ? "bg-primary text-primary-foreground font-semibold shadow-sm"
                         : "border border-border bg-surface-2 text-muted-foreground hover:text-foreground"
                     }`}
                   >
-                    {fmt}
+                    {label}
                   </button>
                 ))}
               </div>
@@ -1560,7 +1318,7 @@ function ProjectEditor() {
               {isRendering ? (
                 <>
                   <span className="h-4 w-4 animate-spin rounded-full border-2 border-primary-foreground border-t-transparent" />
-                  Rendering Frames...
+                  Rendering {exportFormat.toUpperCase()} Frames...
                 </>
               ) : (
                 <>
@@ -1569,7 +1327,7 @@ function ProjectEditor() {
                     <path d="m7 10 5 5 5-5" />
                     <path d="M5 21h14" />
                   </svg>
-                  Render &amp; Download {exportFormat.toUpperCase()}
+                  Render &amp; Download {exportFormat === "png-sequence" ? "ZIP" : exportFormat.toUpperCase()}
                 </>
               )}
             </button>
