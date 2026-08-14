@@ -74,7 +74,22 @@ app.post('/api/render-video', async (req, res) => {
     const outputFileName = `${baseSlug}_${fps}fps${fileExt}`;
     const outputFilePath = path.join(rendersDir, outputFileName);
 
-    console.log(`[API /render-video] Starting render: ${preset ? `Preset: ${preset}` : `${width}x${height}`} @ ${fps} FPS (Format: ${targetFormat}, Transparent: ${transparent})`);
+    const isSSE = req.headers.accept?.includes('text/event-stream') || req.query.sse === 'true';
+
+    if (isSSE) {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.flushHeaders?.();
+    }
+
+    const sendSSE = (data) => {
+      if (isSSE) {
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+      }
+    };
+
+    console.log(`[API /render-video] Starting render: ${preset ? `Preset: ${preset}` : `${width}x${height}`} @ ${fps} FPS (Format: ${targetFormat}, Transparent: ${transparent}, SSE: ${isSSE})`);
 
     const result = await renderVideo({
       html,
@@ -88,7 +103,16 @@ app.post('/api/render-video', async (req, res) => {
       format: targetFormat,
       transparent: Boolean(transparent),
       backgroundColor: backgroundColor || '#ffffff',
-      outputPath: outputFilePath
+      includeEditorWrapper: Boolean(req.body.includeEditorWrapper),
+      outputPath: outputFilePath,
+      onProgress: ({ currentFrame, totalFrames, percent }) => {
+        sendSSE({
+          type: 'progress',
+          frame: currentFrame,
+          total: totalFrames,
+          percentage: percent
+        });
+      }
     });
 
     const videoUrl = `/renders/${outputFileName}`;
@@ -96,7 +120,8 @@ app.post('/api/render-video', async (req, res) => {
 
     console.log(`[API /render-video] Render complete: ${outputFileName} (${result.duration.toFixed(2)}s, ${result.totalFrames} frames)`);
 
-    return res.json({
+    const payload = {
+      type: 'complete',
       success: true,
       videoUrl,
       downloadUrl,
@@ -107,10 +132,21 @@ app.post('/api/render-video', async (req, res) => {
       width: result.width,
       height: result.height,
       fps: result.fps
-    });
+    };
+
+    if (isSSE) {
+      sendSSE(payload);
+      return res.end();
+    }
+
+    return res.json(payload);
 
   } catch (error) {
     console.error('[API /render-video] Execution failed:', error);
+    if (req.headers.accept?.includes('text/event-stream') || req.query.sse === 'true') {
+      res.write(`data: ${JSON.stringify({ type: 'error', error: error.message || 'Render failed' })}\n\n`);
+      return res.end();
+    }
     return res.status(500).json({
       success: false,
       error: error.message || 'Internal server error during video rendering.'
