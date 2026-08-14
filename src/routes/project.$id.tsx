@@ -333,8 +333,9 @@ function ProjectEditor() {
       });
 
       setSpatialManifest(manifest);
-    }, 150);
-  }, [htmlCode, cssCode, bgMode, customBgColor]);
+      handleApplyManualMotion();
+    }, 120);
+  }, [htmlCode, cssCode, bgMode, customBgColor, handleApplyManualMotion]);
 
   useEffect(() => {
     updateCanvasAndSpatial();
@@ -431,73 +432,85 @@ function ProjectEditor() {
     const iframeDoc = iframeRef.current.contentDocument;
     if (!iframeWin || !iframeDoc) return;
 
-    const gsapObj = iframeWin.gsap || gsap;
-
-    if (gsapObj && gsapObj.killTweensOf) {
-      gsapObj.killTweensOf("*");
-    }
-    if (timelineRef.current) {
-      timelineRef.current.kill();
-      timelineRef.current = null;
-    }
-
-    if (iframeDoc.body) {
-      const targets = iframeDoc.querySelectorAll('[id], [data-animate="true"], div, img, h1, h2, h3, p, span, svg');
-      targets.forEach((el: any) => {
-        if (gsapObj && gsapObj.set) {
-          gsapObj.set(el, { clearProps: "all" });
-        }
-        el.removeAttribute("style");
-      });
-    }
-
-    setManualGsapError(null);
-
-    try {
-      const existingScript = iframeDoc.getElementById("user-motion-script");
-      if (existingScript) {
-        existingScript.remove();
+    let attempts = 0;
+    const executeMotion = () => {
+      const gsapObj = iframeWin.gsap || gsap;
+      if (!gsapObj && attempts < 20) {
+        attempts++;
+        setTimeout(executeMotion, 50);
+        return;
       }
 
-      if (gsapObj.globalTimeline && typeof gsapObj.globalTimeline.time === "function") {
-        gsapObj.globalTimeline.clear();
-        gsapObj.globalTimeline.time(0);
+      if (!gsapObj) return;
+
+      if (gsapObj.killTweensOf) {
+        gsapObj.killTweensOf("*");
+      }
+      if (timelineRef.current) {
+        timelineRef.current.kill();
+        timelineRef.current = null;
       }
 
-      const runInIframeScope = iframeWin.Function('gsap', 'document', 'window', manualCode);
-      runInIframeScope(gsapObj, iframeDoc, iframeWin);
-
-      const newScript = iframeDoc.createElement("script");
-      newScript.id = "user-motion-script";
-      newScript.textContent = `/* Kanto User Motion Script */\n${manualCode}`;
-      iframeDoc.body.appendChild(newScript);
-
-      if (gsapObj.globalTimeline) {
-        const globalTL = gsapObj.globalTimeline;
-        const realDur = getCleanDuration(globalTL);
-        setTotalDuration(realDur);
-
-        globalTL.eventCallback("onUpdate", () => {
-          const rawTime = globalTL.time();
-          const cur = realDur > 0 ? (rawTime % realDur) : rawTime;
-          const p = realDur > 0 ? (cur / realDur) : 0;
-          setCurrentTime(cur);
-          setScrubberProgress(p * 100);
-        });
-
-        globalTL.eventCallback("onComplete", () => {
-          if (isLoopingRef.current) {
-            globalTL.restart();
-          } else {
-            setIsPlaying(false);
+      if (iframeDoc.body) {
+        const targets = iframeDoc.querySelectorAll('[id], [data-animate="true"], div, img, h1, h2, h3, p, span, svg');
+        targets.forEach((el: any) => {
+          if (gsapObj.set) {
+            gsapObj.set(el, { clearProps: "all" });
           }
+          el.removeAttribute("style");
         });
       }
-      
-      setIsPlaying(true);
-    } catch (err: any) {
-      setManualGsapError(err.message || "Syntax or Execution Error in GSAP Code");
-    }
+
+      setManualGsapError(null);
+
+      try {
+        const existingScript = iframeDoc.getElementById("user-motion-script");
+        if (existingScript) {
+          existingScript.remove();
+        }
+
+        if (gsapObj.globalTimeline && typeof gsapObj.globalTimeline.time === "function") {
+          gsapObj.globalTimeline.clear();
+          gsapObj.globalTimeline.time(0);
+        }
+
+        const runInIframeScope = new (iframeWin.Function || Function)('gsap', 'document', 'window', manualCode);
+        runInIframeScope(gsapObj, iframeDoc, iframeWin);
+
+        const newScript = iframeDoc.createElement("script");
+        newScript.id = "user-motion-script";
+        newScript.textContent = `/* Kanto User Motion Script */\n${manualCode}`;
+        iframeDoc.body.appendChild(newScript);
+
+        if (gsapObj.globalTimeline) {
+          const globalTL = gsapObj.globalTimeline;
+          const realDur = getCleanDuration(globalTL);
+          setTotalDuration(realDur);
+
+          globalTL.eventCallback("onUpdate", () => {
+            const rawTime = globalTL.time();
+            const cur = realDur > 0 ? (rawTime % realDur) : rawTime;
+            const p = realDur > 0 ? (cur / realDur) : 0;
+            setCurrentTime(cur);
+            setScrubberProgress(p * 100);
+          });
+
+          globalTL.eventCallback("onComplete", () => {
+            if (isLoopingRef.current) {
+              globalTL.restart();
+            } else {
+              setIsPlaying(false);
+            }
+          });
+        }
+        
+        setIsPlaying(true);
+      } catch (err: any) {
+        setManualGsapError(err.message || "Syntax or Execution Error in GSAP Code");
+      }
+    };
+
+    executeMotion();
   }, [manualCode, getCleanDuration]);
 
   useEffect(() => {

@@ -4,9 +4,11 @@ export interface Project {
   html: string;
   css: string;
   js: string;
-  aspectRatio: "16:9" | "9:16" | "1:1";
+  aspectRatio: string;
   updatedAt: string;
   kind?: string;
+  previewKind?: string;
+  duration?: string;
 }
 
 const STORAGE_KEY = "kanto_motion_projects";
