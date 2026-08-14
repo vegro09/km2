@@ -62,12 +62,10 @@ function Dashboard() {
   const [projectsList, setProjectsList] = useState<Project[]>([]);
   const [searchTerm, setSearchTerm] = useState("");
 
-  // Task 4: Fetch real user projects dynamically from localStorage
   useEffect(() => {
     setProjectsList(getProjects());
   }, []);
 
-  // Task 4: "Create New Project" handler instantiates record and navigates to /project/:id
   const handleCreateNewProject = () => {
     const newProj = createDefaultProject("New Motion Project");
     navigate({ to: "/project/$id", params: { id: newProj.id } });
@@ -99,134 +97,135 @@ function Dashboard() {
               onClick={handleCreateNewProject}
               className="flex h-9 items-center justify-center rounded-xl bg-primary px-4 text-xs font-semibold text-primary-foreground hover:opacity-90 transition-opacity"
             >
-              + New Project
+              + Create Project
             </button>
+            <div className="flex h-8 w-8 items-center justify-center rounded-full border border-border bg-surface-2 text-xs font-medium">
+              V
+            </div>
           </div>
         </div>
       </header>
 
-      <main className="mx-auto max-w-[1200px] px-6 py-10">
-        {/* Hero Section */}
-        <section id="hero-action-card" data-animate="true" className="bento p-8">
-          <div className="flex flex-col gap-6 md:flex-row md:items-end md:justify-between">
-            <div>
-              <p className="text-[11px] uppercase tracking-[0.24em] text-muted-foreground">Workspace</p>
-              <h1 className="mt-3 text-3xl font-semibold tracking-tight md:text-4xl">
-                Projects Dashboard
-              </h1>
-              <p className="mt-3 max-w-xl text-sm text-muted-foreground">
-                Edit HTML/CSS layouts, craft 60fps GSAP animations, and render deterministic MP4 video exports.
-              </p>
+      {/* Main Workspace Area */}
+      <main id="dashboard-workspace" data-animate="true" className="mx-auto max-w-[1200px] px-6 py-8">
+        <section id="dashboard-banner" data-animate="true" className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h1 className="text-xl font-semibold tracking-tight">Projects</h1>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Manage your motion canvases and jump into the live editor.
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            <div className="relative">
+              <input
+                id="search-projects-input"
+                data-animate="true"
+                type="text"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder="Search projects..."
+                className="h-10 w-64 rounded-xl border border-border bg-surface px-3.5 pl-9 text-xs text-foreground placeholder:text-muted-foreground focus:border-primary/60 focus:outline-none"
+              />
+              <svg
+                width="14"
+                height="14"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="absolute left-3 top-3 text-muted-foreground"
+              >
+                <circle cx="11" cy="11" r="8" />
+                <path d="m21 21-4.3-4.3" />
+              </svg>
             </div>
+
             <button
               id="create-project-button"
               data-animate="true"
               type="button"
               onClick={handleCreateNewProject}
-              className="flex h-12 shrink-0 items-center justify-center rounded-xl bg-primary px-6 text-sm font-semibold text-primary-foreground shadow-md shadow-primary/20 hover:opacity-90 transition-opacity"
+              className="flex h-10 items-center justify-center rounded-xl bg-primary px-4 text-xs font-semibold text-primary-foreground hover:opacity-90 transition-opacity shadow-md shadow-primary/20"
             >
-              + Create New Motion Project
+              New Project
             </button>
           </div>
+        </section>
 
-          <div className="mt-8 grid grid-cols-2 gap-3 md:grid-cols-4">
-            {[
-              ["Active Projects", projectsList.length.toString()],
-              ["Engine Mode", "GSAP v3.12"],
-              ["Resolution", "1920 × 1080"],
-              ["Export Format", "MP4"],
-            ].map(([label, value]) => (
-              <div
-                key={label}
-                id={`stat-${String(label).toLowerCase().replace(/\s+/g, "-")}`}
-                data-animate="true"
-                className="rounded-xl border border-border bg-surface-2 p-4"
-              >
-                <p className="text-[11px] text-muted-foreground">{label}</p>
-                <p className="mt-1 text-lg font-semibold">{value}</p>
+        {/* Project Cards Grid */}
+        <section id="projects-grid" data-animate="true" className="mt-8 grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+          {filteredProjects.map((proj) => (
+            <div
+              key={proj.id}
+              id={`project-card-${proj.id}`}
+              data-animate="true"
+              onClick={() => navigate({ to: "/project/$id", params: { id: proj.id } })}
+              className="bento group relative flex flex-col overflow-hidden p-0 transition-all hover:border-primary/40 cursor-pointer"
+            >
+              {/* Card Thumbnail Area */}
+              <div className="relative h-44 w-full overflow-hidden border-b border-border bg-surface-2 p-3">
+                <Thumb kind={proj.previewKind} />
+                <span className="absolute bottom-3 right-3 rounded-md border border-border/80 bg-background/90 px-2 py-0.5 font-mono text-[10.5px] tabular-nums text-muted-foreground backdrop-blur">
+                  {proj.duration}
+                </span>
+                <span className="absolute top-3 left-3 rounded-md border border-border/80 bg-background/90 px-2 py-0.5 font-mono text-[10px] text-muted-foreground backdrop-blur">
+                  {proj.aspectRatio || "16:9"}
+                </span>
               </div>
-            ))}
-          </div>
-        </section>
 
-        {/* Filter & Search Bar */}
-        <section
-          id="project-filter-bar"
-          data-animate="true"
-          className="mt-6 flex flex-col gap-3 rounded-2xl border border-border bg-surface p-3 md:flex-row md:items-center md:justify-between"
-        >
-          <input
-            id="project-search-input"
-            data-animate="true"
-            type="search"
-            value={searchTerm}
-            onChange={(e) => setSearchTerm(e.target.value)}
-            placeholder="Search projects…"
-            className="h-10 w-full rounded-xl border border-border bg-background px-3.5 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary md:max-w-xs"
-          />
-          <div className="flex gap-2">
-            <span className="h-10 flex items-center rounded-xl bg-primary/10 border border-primary/30 px-4 text-[12px] font-medium text-primary">
-              All Saved Projects ({filteredProjects.length})
-            </span>
-          </div>
-        </section>
-
-        {/* Real Projects Grid or Clean Empty State */}
-        {filteredProjects.length === 0 ? (
-          <section
-            id="empty-state-section"
-            data-animate="true"
-            className="mt-8 flex flex-col items-center justify-center rounded-2xl border border-dashed border-border bg-surface p-16 text-center"
-          >
-            <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-border bg-surface-2 text-primary shadow-inner mb-4">
-              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
-                <line x1="12" y1="8" x2="12" y2="16" />
-                <line x1="8" y1="12" x2="16" y2="12" />
-              </svg>
+              {/* Card Meta Area */}
+              <div className="flex flex-1 flex-col justify-between p-4">
+                <div>
+                  <h2 className="text-sm font-semibold tracking-tight text-foreground group-hover:text-primary transition-colors">
+                    {proj.title}
+                  </h2>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    Updated {proj.updatedAt}
+                  </p>
+                </div>
+                <div className="mt-4 flex items-center justify-between border-t border-border pt-3">
+                  <span className="text-[11px] text-muted-foreground font-mono">
+                    GSAP Timeline
+                  </span>
+                  <span className="text-xs font-semibold text-primary group-hover:translate-x-0.5 transition-transform">
+                    Open Studio &rarr;
+                  </span>
+                </div>
+              </div>
             </div>
-            <h2 className="text-xl font-semibold text-foreground">No Saved Projects</h2>
-            <p className="mt-2 text-sm text-muted-foreground max-w-sm">
-              You haven't created any motion projects yet. Create your first project workspace to start animating HTML/CSS components with GSAP.
-            </p>
-            <button
-              id="empty-create-project-button"
-              type="button"
-              onClick={handleCreateNewProject}
-              className="mt-6 flex h-11 items-center justify-center gap-2 rounded-xl bg-primary px-6 text-sm font-semibold text-primary-foreground hover:opacity-90 transition-opacity shadow-md shadow-primary/20"
+          ))}
+
+          {/* Empty State Card if no projects match */}
+          {filteredProjects.length === 0 && (
+            <div
+              id="empty-projects-state"
+              data-animate="true"
+              className="bento col-span-full flex flex-col items-center justify-center p-12 text-center"
             >
-              + Create New Project
-            </button>
-          </section>
-        ) : (
-          <section id="project-grid" data-animate="true" className="mt-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {filteredProjects.map((p) => (
-              <article key={p.id} id={`project-card-${p.id}`} data-animate="true" className="bento p-3">
-                <div className="h-40 rounded-xl bg-background p-3">
-                  <Thumb kind={p.kind} />
-                </div>
-                <div className="flex items-end justify-between px-1 pb-1 pt-4">
-                  <div>
-                    <h2 className="text-sm font-semibold">{p.title || "Untitled Project"}</h2>
-                    <p className="mt-1 text-[11px] text-muted-foreground">
-                      Edited {p.updatedAt ? new Date(p.updatedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "Recently"}
-                    </p>
-                  </div>
-                  {/* Clicking any project card opens /project/:id */}
-                  <Link
-                    id={`open-editor-${p.id}`}
-                    data-animate="true"
-                    to="/project/$id"
-                    params={{ id: p.id }}
-                    className="flex h-9 items-center rounded-lg border border-border bg-surface-2 px-3 text-[12px] font-medium hover:border-primary/50 transition-colors"
-                  >
-                    Open Editor
-                  </Link>
-                </div>
-              </article>
-            ))}
-          </section>
-        )}
+              <div className="flex h-12 w-12 items-center justify-center rounded-2xl border border-border bg-surface-2 text-muted-foreground">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+                  <polyline points="14 2 14 8 20 8" />
+                  <line x1="12" y1="18" x2="12" y2="12" />
+                  <line x1="9" y1="15" x2="15" y2="15" />
+                </svg>
+              </div>
+              <h3 className="mt-4 text-sm font-semibold">No projects found</h3>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {searchTerm ? "No projects match your search query." : "Get started by creating your first motion canvas."}
+              </p>
+              <button
+                type="button"
+                onClick={handleCreateNewProject}
+                className="mt-4 rounded-xl bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground hover:opacity-90 transition-opacity"
+              >
+                Create Project
+              </button>
+            </div>
+          )}
+        </section>
       </main>
     </div>
   );

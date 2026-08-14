@@ -602,72 +602,44 @@ function ProjectEditor() {
         format: exportFormat,
         transparent: bgMode === "transparent",
         backgroundColor: bgMode === "white" ? "#ffffff" : bgMode === "custom" ? customBgColor : "#ffffff",
-        includeEditorWrapper: true,
         filename: projectTitle.trim().replace(/[^a-zA-Z0-9_-]/g, "_") || "kanto_motion"
       };
 
-      const response = await fetch(`${API_BASE}/api/render-video?sse=true`, {
+      setRenderProgress(45);
+
+      const response = await fetch(`${API_BASE}/api/render-video`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Accept": "text/event-stream"
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload)
       });
 
-      if (!response.ok || !response.body) {
+      if (!response.ok) {
         const errJson = await response.json().catch(() => ({}));
         throw new Error(errJson.error || `Server returned error status ${response.status}`);
       }
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder("utf-8");
-      let bufferStr = "";
+      setRenderProgress(85);
+      const data = await response.json();
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        bufferStr += decoder.decode(value, { stream: true });
-        const lines = bufferStr.split("\n\n");
-        bufferStr = lines.pop() || "";
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (trimmed.startsWith("data: ")) {
-            try {
-              const eventData = JSON.parse(trimmed.slice(6));
-              if (eventData.type === "progress") {
-                setCurrentRenderFrame(eventData.frame);
-                setTotalRenderFrames(eventData.total);
-                setRenderProgress(eventData.percentage);
-              } else if (eventData.type === "complete") {
-                setRenderProgress(100);
-                setCurrentRenderFrame(eventData.totalFrames || estimatedFrames);
-                setTotalRenderFrames(eventData.totalFrames || estimatedFrames);
-
-                const downloadFullUrl = `${API_BASE}${eventData.downloadUrl || eventData.videoUrl}`;
-                setRenderedVideoUrl(downloadFullUrl);
-
-                // Trigger automatic browser file download
-                const a = document.createElement("a");
-                a.href = downloadFullUrl;
-                a.download = eventData.fileName || `${payload.filename}_${framerate}fps.${exportFormat === "prores" ? "mov" : exportFormat === "png-sequence" ? "zip" : exportFormat}`;
-                a.target = "_blank";
-                document.body.appendChild(a);
-                a.click();
-                document.body.removeChild(a);
-              } else if (eventData.type === "error" || eventData.error) {
-                throw new Error(eventData.error || "Rendering failed");
-              }
-            } catch (e: any) {
-              if (e.message && e.message !== "Unexpected end of JSON input") {
-                console.warn("SSE event parse error:", e);
-              }
-            }
-          }
-        }
+      if (!data.success) {
+        throw new Error(data.error || "Rendering pipeline failed to compile media file.");
       }
+
+      setRenderProgress(100);
+      setCurrentRenderFrame(data.totalFrames || estimatedFrames);
+      setTotalRenderFrames(data.totalFrames || estimatedFrames);
+
+      const downloadFullUrl = `${API_BASE}${data.downloadUrl || data.videoUrl}`;
+      setRenderedVideoUrl(downloadFullUrl);
+
+      // Trigger automatic browser download
+      const a = document.createElement("a");
+      a.href = downloadFullUrl;
+      a.download = data.fileName || `${payload.filename}_${framerate}fps.${exportFormat === "prores" ? "mov" : exportFormat === "png-sequence" ? "zip" : exportFormat}`;
+      a.target = "_blank";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
 
     } catch (err: any) {
       console.error("Export Failed:", err);

@@ -1,7 +1,7 @@
 /**
  * ============================================================================
  * KANTO MOTION — GPU-ACCELERATED ZERO-DISK-I/O RENDERING ENGINE
- * WITH SSE REAL-TIME PROGRESS & 1:1 EDITOR CANVAS CLONING
+ * WITH STRICT SOCIAL MEDIA RESOLUTION PRESETS & BOUNDING BOX CAPTURE
  * ============================================================================
  */
 
@@ -32,11 +32,10 @@ export async function renderVideo(options = {}) {
   const cssContent = options.css || '';
   const jsContent = options.js || '';
   const motionPlan = options.motionPlan || null;
-  const includeEditorWrapper = Boolean(options.includeEditorWrapper);
 
   // Resolve Social Media Preset or Explicit Dimensions
-  let targetWidth = options.width || (includeEditorWrapper ? 1200 : 1920);
-  let targetHeight = options.height || (includeEditorWrapper ? 800 : 1080);
+  let targetWidth = options.width || 1920;
+  let targetHeight = options.height || 1080;
   let activePreset = null;
 
   if (options.preset) {
@@ -72,7 +71,7 @@ export async function renderVideo(options = {}) {
   let browser = null;
 
   try {
-    console.log(`[GPU Renderer] Target Resolution: ${width}x${height} (${activePreset ? `Preset: ${activePreset}` : 'Custom'}, EditorWrapper: ${includeEditorWrapper}, ${fps} FPS, Format: ${format.toUpperCase()})...`);
+    console.log(`[GPU Renderer] Target Resolution: ${width}x${height} (${activePreset ? `Preset: ${activePreset}` : 'Custom'}, ${fps} FPS, Format: ${format.toUpperCase()}, Alpha: ${transparent})...`);
 
     browser = await puppeteer.launch({
       headless: 'new',
@@ -91,7 +90,13 @@ export async function renderVideo(options = {}) {
     });
 
     const page = await browser.newPage();
-    await page.setViewport({ width, height, deviceScaleFactor: 1 });
+
+    // 1. Strict Viewport & Scale Enforcement
+    await page.setViewport({
+      width,
+      height,
+      deviceScaleFactor: 1
+    });
 
     const gsapPath = path.resolve('./node_modules/gsap/dist/gsap.min.js');
     const gsapScript = fs.existsSync(gsapPath) ? fs.readFileSync(gsapPath, 'utf8') : '';
@@ -100,29 +105,11 @@ export async function renderVideo(options = {}) {
       ? 'background: transparent !important; background-color: transparent !important;'
       : `background: ${backgroundColor} !important; background-color: ${backgroundColor} !important;`;
 
-    // 1:1 Canvas Card Wrapper Layout Template
-    const innerComponentHTML = includeEditorWrapper ? `
-      <div id="editor-canvas-stage" style="display: flex; justify-content: center; align-items: center; width: 100vw; height: 100vh; background-color: #000; background-image: linear-gradient(#111 1px, transparent 1px), linear-gradient(90deg, #111 1px, transparent 1px); background-size: 20px 20px; margin:0; padding:0;">
-        <div id="target-animation-element" style="background: white; border-radius: 24px; padding: 60px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); display: flex; justify-content: center; align-items: center; position: relative;">
-          <div id="kanto-root">
-            ${htmlContent}
-          </div>
-        </div>
-      </div>
-    ` : `
-      <div id="kanto-root">
-        ${htmlContent}
-      </div>
-    `;
-
     const fullDocument = `
       <!DOCTYPE html>
       <html style="width:${width}px !important; height:${height}px !important; margin:0 !important; padding:0 !important; overflow:hidden !important; ${bodyBgStyle}">
         <head>
           <meta charset="utf-8" />
-          <link rel="preconnect" href="https://fonts.googleapis.com">
-          <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-          <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
           <style>
             *, *::before, *::after { box-sizing: border-box !important; }
             html, body {
@@ -134,26 +121,37 @@ export async function renderVideo(options = {}) {
               justify-content: center !important;
               align-items: center !important;
               overflow: hidden !important;
-              font-family: 'Inter', 'Plus Jakarta Sans', sans-serif;
               box-sizing: border-box !important;
               ${bodyBgStyle}
             }
             #kanto-root, #app-viewport, #target-animation-element {
-              transform-origin: center center;
+              width: ${width}px !important;
+              height: ${height}px !important;
+              margin: 0 !important;
+              padding: 0 !important;
               position: relative !important;
+              display: flex !important;
+              align-items: center !important;
+              justify-content: center !important;
+              overflow: hidden !important;
+              box-sizing: border-box !important;
+              transform-origin: center center;
             }
             ${cssContent}
           </style>
           <script>${gsapScript}</script>
         </head>
         <body style="${bodyBgStyle}">
-          ${innerComponentHTML}
+          <div id="kanto-root">
+            ${htmlContent}
+          </div>
         </body>
       </html>
     `;
 
     await page.setContent(fullDocument, { waitUntil: 'load', timeout: 25000 });
 
+    // 2. Force Canvas Centering & Reset Injection
     await page.addStyleTag({
       content: `
         html, body {
@@ -164,13 +162,21 @@ export async function renderVideo(options = {}) {
           display: flex !important;
           justify-content: center !important;
           align-items: center !important;
+          background: transparent !important;
           overflow: hidden !important;
+        }
+        #kanto-root, #app-viewport, #target-animation-element {
+          transform-origin: center center;
+          position: relative !important;
+          width: ${width}px !important;
+          height: ${height}px !important;
         }
       `
     });
 
+    // 3. Wait for Computed Layout Stabilization
     await page.waitForFunction(() => {
-      const el = document.querySelector('#target-animation-element') || document.querySelector('#kanto-root') || document.body;
+      const el = document.querySelector('#kanto-root') || document.querySelector('#app-viewport') || document.querySelector('#target-animation-element') || document.body;
       return el && el.clientHeight > 0 && el.clientWidth > 0;
     }, { timeout: 10000 }).catch(() => {});
 
@@ -313,6 +319,21 @@ export async function renderVideo(options = {}) {
       });
     }
 
+    // 4. Exact Bounding Box & Target Element Reference
+    const animElement = await page.$('#target-animation-element') || await page.$('#kanto-root') || await page.$('#app-viewport');
+    let clipArea = null;
+    if (animElement) {
+      const box = await animElement.boundingBox();
+      if (box && box.width > 0 && box.height > 0) {
+        clipArea = {
+          x: Math.max(0, Math.floor(box.x)),
+          y: Math.max(0, Math.floor(box.y)),
+          width: Math.min(width, Math.ceil(box.width)),
+          height: Math.min(height, Math.ceil(box.height))
+        };
+      }
+    }
+
     for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
       const targetTimeSec = (frameIndex / (totalFrames - 1 || 1)) * exactDuration;
 
@@ -329,10 +350,15 @@ export async function renderVideo(options = {}) {
         }
       }, targetTimeSec);
 
-      const frameBuffer = await page.screenshot({
+      const screenshotOpts = {
         type: 'png',
         omitBackground: transparent
-      });
+      };
+      if (clipArea) {
+        screenshotOpts.clip = clipArea;
+      }
+
+      const frameBuffer = await page.screenshot(screenshotOpts);
 
       if (format === 'png-sequence' && archive) {
         const fileName = `frame_${String(frameIndex).padStart(4, '0')}.png`;
