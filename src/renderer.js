@@ -1,30 +1,29 @@
 /**
  * ============================================================================
  * KANTO MOTION — GPU-ACCELERATED ZERO-DISK-I/O RENDERING ENGINE
+ * WITH STRICT SOCIAL MEDIA RESOLUTION PRESETS & VIEWPORT ENFORCEMENT
  * ============================================================================
  * 
- * PERFORMANCE & ACCURACY ARCHITECTURE:
+ * ARCHITECTURE & RESOLUTION PRESETS:
  * ----------------------------------------------------------------------------
- * 1. GPU ACCELERATION (HEADLESS BROWSER):
- *    Forces hardware GPU rasterization (`--enable-gpu`, `--ignore-gpu-blocklist`,
- *    `--enable-accelerated-2d-canvas`, `--use-gl=angle`) for maximum rendering speed.
+ * 1. SOCIAL MEDIA PRESET DICTIONARY:
+ *    Supports standard industry presets:
+ *      - tiktok / reels / shorts / story : 1080 x 1920 (9:16)
+ *      - instagram-square / square        : 1080 x 1080 (1:1)
+ *      - instagram-portrait / portrait    : 1080 x 1350 (4:5)
+ *      - youtube / landscape / hd         : 1920 x 1080 (16:9)
+ *      - 4k                               : 3840 x 2160 (16:9)
  * 
- * 2. ZERO DISK I/O MEMORY STREAMING:
- *    Captures high-resolution frame buffers directly in RAM memory and pipes them
- *    as binary PNG buffers into FFmpeg's `stdin` (`image2pipe`). Eliminates hard
- *    drive write bottlenecks completely. Handles stream backpressure (`drain`).
+ * 2. STRICT VIEWPORT & CONTAINER STYLING:
+ *    Forces Puppeteer viewport to exact target dimensions (`setViewport({ width, height })`)
+ *    and injects CSS container rules to guarantee 100% viewport alignment and centering
+ *    without unwanted margins, scrollbars, or layout clipping.
  * 
- * 3. UNIVERSAL ANIMATION SCRUBBING & FORCED PAINT REFLOW:
- *    Freezes the real-time clock. Scrubs GSAP (`gsap.globalTimeline.time(t)`)
- *    and Web Animations API (`anim.currentTime`) per frame. Triggers synchronous
- *    DOM layout recalculation (`void document.body.offsetHeight`) to force Blink
- *    and GPU compositor reflow before snapping each screenshot buffer.
+ * 3. ZERO DISK I/O MEMORY STREAMING:
+ *    Captures frame screenshot buffers in RAM and pipes them directly to FFmpeg `stdin`.
  * 
- * 4. MULTI-FORMAT GPU ENCODING (FFMPEG):
- *    - WebM (VP9 + Yuva420p) -> True Alpha Transparency for Web.
- *    - MP4 (H.264 + Yuv420p) -> High-compatibility H.264 output.
- *    - ProRes 4444 (.mov)    -> 10-bit Master with Alpha Channel.
- *    - PNG Sequence (.zip)   -> Direct memory-archived PNG frames.
+ * 4. FFMPEG RESOLUTION MATCHING:
+ *    Ensures FFmpeg output matches the captured PNG frame resolution (`-s ${width}x${height}`).
  * ============================================================================
  */
 
@@ -36,15 +35,34 @@ import ffmpegPath from 'ffmpeg-static';
 import { ZipArchive } from 'archiver';
 
 /**
- * Renders an HTML/CSS/GSAP animation into a media file using GPU acceleration & memory streaming.
+ * Standard Social Media Preset Dictionary
+ */
+export const SOCIAL_PRESETS = {
+  'tiktok': { width: 1080, height: 1920, aspectRatio: '9:16', name: 'TikTok / Reels / Shorts' },
+  'reels': { width: 1080, height: 1920, aspectRatio: '9:16', name: 'TikTok / Reels / Shorts' },
+  'shorts': { width: 1080, height: 1920, aspectRatio: '9:16', name: 'TikTok / Reels / Shorts' },
+  'story': { width: 1080, height: 1920, aspectRatio: '9:16', name: 'Instagram Story' },
+  'instagram-square': { width: 1080, height: 1080, aspectRatio: '1:1', name: 'Instagram Square Post' },
+  'square': { width: 1080, height: 1080, aspectRatio: '1:1', name: 'Square 1:1' },
+  'instagram-portrait': { width: 1080, height: 1350, aspectRatio: '4:5', name: 'Instagram Portrait Post' },
+  'portrait': { width: 1080, height: 1350, aspectRatio: '4:5', name: 'Portrait 4:5' },
+  'youtube': { width: 1920, height: 1080, aspectRatio: '16:9', name: 'YouTube / HD Landscape' },
+  'landscape': { width: 1920, height: 1080, aspectRatio: '16:9', name: 'Landscape 16:9' },
+  'hd': { width: 1920, height: 1080, aspectRatio: '16:9', name: 'Full HD 1080p' },
+  '4k': { width: 3840, height: 2160, aspectRatio: '16:9', name: 'Ultra HD 4K' }
+};
+
+/**
+ * Renders an HTML/CSS/GSAP animation into a media file with strict viewport resolution enforcement.
  * 
  * @param {Object} options
  * @param {string} [options.html=""] Raw HTML markup
  * @param {string} [options.css=""] Raw CSS rules
  * @param {string} [options.js=""] Raw GSAP JavaScript code
  * @param {Object} [options.motionPlan=null] Optional AI keyframe motion plan
- * @param {number} [options.width=1920] Render width (must be even integer)
- * @param {number} [options.height=1080] Render height (must be even integer)
+ * @param {string} [options.preset] Social media preset key (e.g., 'tiktok', 'instagram-square', 'youtube')
+ * @param {number} [options.width=1920] Custom render width
+ * @param {number} [options.height=1080] Custom render height
  * @param {number} [options.fps=30] Target frame rate (e.g., 30, 60 FPS)
  * @param {number} [options.duration] Optional duration override (seconds)
  * @param {('mp4'|'webm'|'prores'|'png-sequence')} [options.format='mp4'] Export format
@@ -52,7 +70,7 @@ import { ZipArchive } from 'archiver';
  * @param {string} [options.backgroundColor='#ffffff'] Canvas background color if not transparent
  * @param {string} [options.outputPath] Output target file path
  * @param {Function} [options.onProgress] Progress callback ({ currentFrame, totalFrames, percent })
- * @returns {Promise<{ outputPath: string, duration: number, totalFrames: number, format: string, width: number, height: number, fps: number }>}
+ * @returns {Promise<{ outputPath: string, duration: number, totalFrames: number, format: string, width: number, height: number, fps: number, preset: string|null }>}
  */
 export async function renderVideo(options = {}) {
   const htmlContent = options.html || '';
@@ -60,9 +78,23 @@ export async function renderVideo(options = {}) {
   const jsContent = options.js || '';
   const motionPlan = options.motionPlan || null;
 
+  // Resolve Social Media Preset or Explicit Dimensions
+  let targetWidth = options.width || 1920;
+  let targetHeight = options.height || 1080;
+  let activePreset = null;
+
+  if (options.preset) {
+    const presetKey = String(options.preset).toLowerCase().trim();
+    if (SOCIAL_PRESETS[presetKey]) {
+      targetWidth = SOCIAL_PRESETS[presetKey].width;
+      targetHeight = SOCIAL_PRESETS[presetKey].height;
+      activePreset = presetKey;
+    }
+  }
+
   // Video encoders strictly require even dimensions (multiples of 2)
-  let width = Math.floor((options.width || 1920) / 2) * 2;
-  let height = Math.floor((options.height || 1080) / 2) * 2;
+  let width = Math.floor(targetWidth / 2) * 2;
+  let height = Math.floor(targetHeight / 2) * 2;
   const fps = Math.max(1, Math.min(120, Number(options.fps) || 30));
   const format = (options.format || 'mp4').toLowerCase();
   const transparent = Boolean(options.transparent);
@@ -91,9 +123,9 @@ export async function renderVideo(options = {}) {
   let browser = null;
 
   try {
-    console.log(`[GPU Renderer] Launching Hardware GPU Chrome (${width}x${height} @ ${fps} FPS, Format: ${format.toUpperCase()}, Alpha: ${transparent})...`);
+    console.log(`[GPU Renderer] Target Resolution: ${width}x${height} (${activePreset ? `Preset: ${activePreset}` : 'Custom'}, ${fps} FPS, Format: ${format.toUpperCase()}, Alpha: ${transparent})...`);
 
-    // 1. Force GPU Acceleration Flags
+    // 1. Force Hardware GPU Acceleration & Strict Window Size Launch Flags
     browser = await puppeteer.launch({
       headless: 'new',
       args: [
@@ -111,6 +143,8 @@ export async function renderVideo(options = {}) {
     });
 
     const page = await browser.newPage();
+
+    // 2. Strict Viewport Enforcement (Critical Requirement)
     await page.setViewport({
       width,
       height,
@@ -125,21 +159,39 @@ export async function renderVideo(options = {}) {
       ? 'background: transparent !important; background-color: transparent !important;'
       : `background: ${backgroundColor} !important; background-color: ${backgroundColor} !important;`;
 
-    // Construct self-contained HTML document
+    // 3. Strict CSS Container Scaling & Centering Injection
     const fullDocument = `
       <!DOCTYPE html>
-      <html style="margin:0; padding:0; width:100%; height:100%; overflow:hidden; ${bodyBgStyle}">
+      <html style="width:${width}px !important; height:${height}px !important; margin:0 !important; padding:0 !important; overflow:hidden !important; ${bodyBgStyle}">
         <head>
           <meta charset="utf-8" />
           <style>
-            *, *::before, *::after { box-sizing: border-box; }
+            *, *::before, *::after {
+              box-sizing: border-box !important;
+            }
             html, body {
-              margin: 0; padding: 0; width: 100%; height: 100%;
-              overflow: hidden; ${bodyBgStyle}
+              width: ${width}px !important;
+              height: ${height}px !important;
+              margin: 0 !important;
+              padding: 0 !important;
+              display: flex !important;
+              justify-content: center !important;
+              align-items: center !important;
+              overflow: hidden !important;
+              box-sizing: border-box !important;
+              ${bodyBgStyle}
             }
             #kanto-root, #app-viewport {
-              width: 100%; height: 100%; margin: 0; padding: 0;
-              position: relative; display: flex; align-items: center; justify-content: center;
+              width: ${width}px !important;
+              height: ${height}px !important;
+              margin: 0 !important;
+              padding: 0 !important;
+              position: relative !important;
+              display: flex !important;
+              align-items: center !important;
+              justify-content: center !important;
+              overflow: hidden !important;
+              box-sizing: border-box !important;
             }
             ${cssContent}
           </style>
@@ -155,6 +207,26 @@ export async function renderVideo(options = {}) {
 
     // Pre-Capture Readiness: Wait for DOM parsing
     await page.setContent(fullDocument, { waitUntil: 'load', timeout: 25000 });
+
+    // Inject explicit CSS tag enforcement to guarantee viewport containment
+    await page.addStyleTag({
+      content: `
+        html, body {
+          width: ${width}px !important;
+          height: ${height}px !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          display: flex !important;
+          justify-content: center !important;
+          align-items: center !important;
+          overflow: hidden !important;
+        }
+        #kanto-root {
+          width: ${width}px !important;
+          height: ${height}px !important;
+        }
+      `
+    });
 
     // Pre-Capture Readiness: Wait for Fonts & Images decoding
     await page.evaluate(async () => {
@@ -177,7 +249,7 @@ export async function renderVideo(options = {}) {
       );
     });
 
-    // Initialize Universal Animator & Calculate Exact Duration
+    // Initialize Universal Animator & Calculate Duration
     const animationMeta = await page.evaluate(async ({ jsCode, plan, forcedDuration }) => {
       const gsap = window.gsap;
       if (!gsap) throw new Error('GSAP library failed to load in browser context.');
@@ -253,14 +325,14 @@ export async function renderVideo(options = {}) {
     const exactDuration = animationMeta.duration;
     const totalFrames = Math.max(1, Math.ceil(exactDuration * fps));
 
-    console.log(`[GPU Renderer] Animation initialized: ${exactDuration.toFixed(2)}s (${totalFrames} frames @ ${fps} FPS).`);
+    console.log(`[GPU Renderer] Rendering ${width}x${height} animation: ${exactDuration.toFixed(2)}s (${totalFrames} frames @ ${fps} FPS).`);
 
     // Ensure output directory exists
     const outputDir = path.dirname(path.resolve(outputPath));
     if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
 
     // =========================================================================
-    // MEMORY STREAMING & FFMPEG HARDWARE ENCODING SETUP (ZERO DISK I/O)
+    // MEMORY STREAMING & FFMPEG RESOLUTION MATCHING ENCODING (ZERO DISK I/O)
     // =========================================================================
     let ffmpegProcess = null;
     let archive = null;
@@ -278,27 +350,26 @@ export async function renderVideo(options = {}) {
       let videoCodecArgs = [];
 
       if (format === 'webm') {
-        // Transparent VP9 WebM
         videoCodecArgs = ['-c:v', 'libvpx-vp9', '-pix_fmt', 'yuva420p', '-b:v', '0', '-crf', '20', '-auto-alt-ref', '0'];
       } else if (format === 'prores') {
-        // ProRes 4444 Master with Alpha
         videoCodecArgs = ['-c:v', 'prores_ks', '-profile:v', '4', '-pix_fmt', 'yuva444p10le', '-vendor', 'apl0'];
       } else {
-        // Universal H.264 MP4 (tries h264_nvenc hardware GPU encoder, falls back to libx264)
         videoCodecArgs = ['-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-preset', 'fast', '-crf', '18', '-movflags', '+faststart'];
       }
 
+      // 4. Strict FFmpeg Output Matching (-s ${width}x${height})
       const spawnArgs = [
         '-y',
         '-f', 'image2pipe',
         '-vcodec', 'png',
         '-framerate', String(fps),
         '-i', '-',
+        '-s', `${width}x${height}`,
         ...videoCodecArgs,
         normalizedOutputPath
       ];
 
-      console.log(`[GPU Renderer] Spawning FFmpeg Stdin Pipe (Zero Disk I/O)...`);
+      console.log(`[GPU Renderer] Spawning FFmpeg Stdin Pipe for ${width}x${height}...`);
       ffmpegProcess = spawn(ffmpegExecutable, spawnArgs, { stdio: ['pipe', 'ignore', 'pipe'] });
 
       let ffmpegErrLog = '';
@@ -335,7 +406,7 @@ export async function renderVideo(options = {}) {
         }
       }, targetTimeSec);
 
-      // 3. Capture Frame Buffer directly in RAM (Zero Disk I/O)
+      // 3. Capture Frame Buffer directly matching exact viewport size
       const frameBuffer = await page.screenshot({
         type: 'png',
         omitBackground: transparent
@@ -380,7 +451,7 @@ export async function renderVideo(options = {}) {
       await ffmpegDone;
     }
 
-    console.log(`[GPU Renderer] Render complete! File created at: ${outputPath}`);
+    console.log(`[GPU Renderer] Render complete! ${width}x${height} video created at: ${outputPath}`);
 
     return {
       outputPath: path.resolve(outputPath),
@@ -389,7 +460,8 @@ export async function renderVideo(options = {}) {
       format,
       width,
       height,
-      fps
+      fps,
+      preset: activePreset
     };
 
   } catch (error) {
@@ -402,20 +474,18 @@ export async function renderVideo(options = {}) {
   }
 }
 
-// Standalone execution runner (node src/renderer.js --test)
+// Standalone execution runner for Social Media Preset testing
 if (process.argv.includes('--test') || process.argv.includes('--cli')) {
   (async () => {
-    console.log('--- Running Standalone GPU Memory-Streaming Test ---');
+    console.log('--- Running TikTok (9:16 1080x1920) Preset Test ---');
     const result = await renderVideo({
-      html: '<div style="width:250px;height:120px;background:#8b5cf6;border-radius:16px;display:flex;align-items:center;justify-content:center;color:#fff;font-family:sans-serif;font-size:20px;font-weight:bold;">⚡ GPU Stream</div>',
+      preset: 'tiktok',
+      html: '<div style="width:400px;height:200px;background:#e11d48;border-radius:24px;display:flex;align-items:center;justify-content:center;color:#fff;font-family:sans-serif;font-size:32px;font-weight:bold;">🎵 TikTok 9:16</div>',
       css: 'body { display:flex; align-items:center; justify-content:center; height:100vh; margin:0; }',
-      js: 'gsap.fromTo("div", { scale: 0.5, rotation: -15 }, { scale: 1.1, rotation: 0, duration: 1, yoyo: true, repeat: 1, ease: "power2.inOut" });',
-      width: 1280,
-      height: 720,
+      js: 'gsap.fromTo("div", { scale: 0.5, rotation: -10 }, { scale: 1.2, rotation: 0, duration: 1, yoyo: true, repeat: 1 });',
       fps: 30,
-      format: 'webm',
-      transparent: true,
-      outputPath: path.resolve('./public/renders/gpu_stream_test.webm')
+      format: 'mp4',
+      outputPath: path.resolve('./public/renders/test_tiktok_1080x1920.mp4')
     });
     console.log('Test completed successfully:', result);
   })().catch(console.error);

@@ -40,6 +40,7 @@ app.post('/api/render-video', async (req, res) => {
       html = '',
       css = '',
       js = '',
+      preset,
       width = 1920,
       height = 1080,
       fps = 30,
@@ -73,12 +74,13 @@ app.post('/api/render-video', async (req, res) => {
     const outputFileName = `${baseSlug}_${fps}fps${fileExt}`;
     const outputFilePath = path.join(rendersDir, outputFileName);
 
-    console.log(`[API /render-video] Starting render: ${width}x${height} @ ${fps} FPS (Format: ${targetFormat}, Transparent: ${transparent})`);
+    console.log(`[API /render-video] Starting render: ${preset ? `Preset: ${preset}` : `${width}x${height}`} @ ${fps} FPS (Format: ${targetFormat}, Transparent: ${transparent})`);
 
     const result = await renderVideo({
       html,
       css,
       js,
+      preset,
       width: Number(width) || 1920,
       height: Number(height) || 1080,
       fps: Number(fps) || 30,
