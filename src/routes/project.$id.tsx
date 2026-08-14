@@ -23,29 +23,77 @@ export const Route = createFileRoute("/project/$id")({
   component: ProjectEditor,
 });
 
-type AspectRatioMode = "16:9" | "9:16" | "1:1";
-type BgMode = "transparent" | "white" | "custom";
+export type SocialTemplateId =
+  | "tiktok"
+  | "instagram-square"
+  | "instagram-portrait"
+  | "youtube";
 
-const ASPECT_RATIO_CONFIGS: Record<AspectRatioMode, { label: string; maxWidth: string; aspectClass: string; resolution: string }> = {
-  "16:9": {
-    label: "16:9 Desktop",
-    maxWidth: "max-w-[960px]",
-    aspectClass: "aspect-video",
-    resolution: "1920 × 1080"
-  },
-  "9:16": {
-    label: "9:16 Mobile",
-    maxWidth: "max-w-[380px]",
+export interface SocialTemplate {
+  id: SocialTemplateId;
+  label: string;
+  sublabel: string;
+  width: number;
+  height: number;
+  aspectRatio: string;
+  aspectClass: string;
+  maxWidth: string;
+  resolution: string;
+  icon: string;
+}
+
+export const SOCIAL_TEMPLATES: Record<SocialTemplateId, SocialTemplate> = {
+  tiktok: {
+    id: "tiktok",
+    label: "TikTok / Reels",
+    sublabel: "9:16 Vertical",
+    width: 1080,
+    height: 1920,
+    aspectRatio: "9:16",
     aspectClass: "aspect-[9/16]",
-    resolution: "1080 × 1920"
+    maxWidth: "max-w-[360px]",
+    resolution: "1080 × 1920",
+    icon: "📱"
   },
-  "1:1": {
-    label: "1:1 Square",
-    maxWidth: "max-w-[540px]",
+  "instagram-square": {
+    id: "instagram-square",
+    label: "Instagram Square",
+    sublabel: "1:1 Square Post",
+    width: 1080,
+    height: 1080,
+    aspectRatio: "1:1",
     aspectClass: "aspect-square",
-    resolution: "1080 × 1080"
+    maxWidth: "max-w-[500px]",
+    resolution: "1080 × 1080",
+    icon: "🔲"
+  },
+  "instagram-portrait": {
+    id: "instagram-portrait",
+    label: "Instagram Portrait",
+    sublabel: "4:5 Portrait Post",
+    width: 1080,
+    height: 1350,
+    aspectRatio: "4:5",
+    aspectClass: "aspect-[4/5]",
+    maxWidth: "max-w-[420px]",
+    resolution: "1080 × 1350",
+    icon: "🖼️"
+  },
+  youtube: {
+    id: "youtube",
+    label: "YouTube / HD",
+    sublabel: "16:9 Landscape",
+    width: 1920,
+    height: 1080,
+    aspectRatio: "16:9",
+    aspectClass: "aspect-video",
+    maxWidth: "max-w-[880px]",
+    resolution: "1920 × 1080",
+    icon: "💻"
   }
 };
+
+type BgMode = "transparent" | "white" | "custom";
 
 function ProjectEditor() {
   const { id: projectId } = Route.useParams();
@@ -60,8 +108,8 @@ function ProjectEditor() {
   const [htmlCode, setHtmlCode] = useState(DEFAULT_HTML);
   const [cssCode, setCssCode] = useState(DEFAULT_CSS);
 
-  // Viewport Aspect Ratio State
-  const [aspectRatio, setAspectRatio] = useState<AspectRatioMode>("16:9");
+  // Social Media Preset State (Default: YouTube 16:9)
+  const [selectedTemplate, setSelectedTemplate] = useState<SocialTemplateId>("youtube");
 
   // Right Panel States & Tabs
   const [activeRightTab, setActiveRightTab] = useState<"spatial" | "manual">("spatial");
@@ -114,7 +162,13 @@ function ProjectEditor() {
       setHtmlCode(loaded.html || DEFAULT_HTML);
       setCssCode(loaded.css || DEFAULT_CSS);
       setManualCode(loaded.js || DEFAULT_JS);
-      if (loaded.aspectRatio) setAspectRatio(loaded.aspectRatio);
+      if (loaded.aspectRatio) {
+        if (loaded.aspectRatio === "9:16") setSelectedTemplate("tiktok");
+        else if (loaded.aspectRatio === "1:1") setSelectedTemplate("instagram-square");
+        else if (loaded.aspectRatio === "4:5") setSelectedTemplate("instagram-portrait");
+        else if (loaded.aspectRatio in SOCIAL_TEMPLATES) setSelectedTemplate(loaded.aspectRatio as SocialTemplateId);
+        else setSelectedTemplate("youtube");
+      }
     } else {
       const newProj: Project = {
         id: projectId,
@@ -140,12 +194,12 @@ function ProjectEditor() {
         html: htmlCode,
         css: cssCode,
         js: manualCode,
-        aspectRatio: aspectRatio,
+        aspectRatio: selectedTemplate,
         updatedAt: new Date().toISOString()
       });
     }, 500);
     return () => clearTimeout(timer);
-  }, [projectId, projectTitle, htmlCode, cssCode, manualCode, aspectRatio]);
+  }, [projectId, projectTitle, htmlCode, cssCode, manualCode, selectedTemplate]);
 
   // Back arrow handler forces immediate save before navigation
   const handleBackToDashboard = () => {
@@ -156,7 +210,7 @@ function ProjectEditor() {
         html: htmlCode,
         css: cssCode,
         js: manualCode,
-        aspectRatio: aspectRatio,
+        aspectRatio: selectedTemplate,
         updatedAt: new Date().toISOString()
       });
     }
@@ -577,16 +631,9 @@ function ProjectEditor() {
     setTotalRenderFrames(estimatedFrames);
 
     try {
-      // Calculate target resolution
-      let renderWidth = 1920;
-      let renderHeight = 1080;
-      if (aspectRatio === "9:16") {
-        renderWidth = 1080;
-        renderHeight = 1920;
-      } else if (aspectRatio === "1:1") {
-        renderWidth = 1080;
-        renderHeight = 1080;
-      }
+      const template = SOCIAL_TEMPLATES[selectedTemplate] || SOCIAL_TEMPLATES["youtube"];
+      const renderWidth = template.width;
+      const renderHeight = template.height;
 
       setRenderProgress(25);
 
@@ -595,6 +642,7 @@ function ProjectEditor() {
         html: htmlCode,
         css: cssCode,
         js: manualCode,
+        preset: selectedTemplate,
         width: renderWidth,
         height: renderHeight,
         fps: framerate,
@@ -602,7 +650,7 @@ function ProjectEditor() {
         format: exportFormat,
         transparent: bgMode === "transparent",
         backgroundColor: bgMode === "white" ? "#ffffff" : bgMode === "custom" ? customBgColor : "#ffffff",
-        filename: projectTitle.trim().replace(/[^a-zA-Z0-9_-]/g, "_") || "kanto_motion"
+        filename: `${projectTitle.trim().replace(/[^a-zA-Z0-9_-]/g, "_") || "kanto_motion"}_${selectedTemplate}`
       };
 
       setRenderProgress(45);
@@ -920,23 +968,27 @@ function ProjectEditor() {
         {/* CENTER PANEL: Live DOM Canvas Viewport */}
         <main id="canvas-panel" data-animate="true" className="flex min-w-0 flex-1 flex-col bg-background">
           <div id="canvas-toolbar" data-animate="true" className="flex h-12 items-center justify-between border-b border-border px-4">
-            <div className="flex gap-1">
-              {(["16:9", "9:16", "1:1"] as AspectRatioMode[]).map((mode) => (
-                <button
-                  key={mode}
-                  id={`aspect-${mode.replace(":", "-")}`}
-                  data-animate="true"
-                  type="button"
-                  onClick={() => setAspectRatio(mode)}
-                  className={`h-8 rounded-lg px-3 text-[12px] font-medium transition-all duration-200 ${
-                    aspectRatio === mode
-                      ? "bg-primary text-primary-foreground font-semibold shadow-md shadow-primary/20"
-                      : "border border-border bg-surface-2 text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  {ASPECT_RATIO_CONFIGS[mode].label}
-                </button>
-              ))}
+            <div className="flex gap-1.5">
+              {(Object.keys(SOCIAL_TEMPLATES) as SocialTemplateId[]).map((tId) => {
+                const t = SOCIAL_TEMPLATES[tId];
+                return (
+                  <button
+                    key={tId}
+                    id={`template-${tId}`}
+                    data-animate="true"
+                    type="button"
+                    onClick={() => setSelectedTemplate(tId)}
+                    className={`h-8 rounded-lg px-2.5 text-[11.5px] font-medium transition-all duration-200 flex items-center gap-1.5 ${
+                      selectedTemplate === tId
+                        ? "bg-primary text-primary-foreground font-semibold shadow-md shadow-primary/20"
+                        : "border border-border bg-surface-2 text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    <span>{t.icon}</span>
+                    <span>{t.label}</span>
+                  </button>
+                );
+              })}
             </div>
             <div className="flex items-center gap-2">
               <span className="rounded-lg border border-primary/30 bg-primary/10 px-2.5 py-0.5 text-[11px] font-medium text-primary">
@@ -946,7 +998,7 @@ function ProjectEditor() {
                 100%
               </span>
               <span id="canvas-resolution" data-animate="true" className="rounded-lg border border-border bg-surface-2 px-3 py-1 text-[11.5px] font-mono text-muted-foreground">
-                {activeAspectConfig.resolution}
+                {activeTemplate.resolution}
               </span>
             </div>
           </div>
@@ -955,7 +1007,7 @@ function ProjectEditor() {
             <div
               id="canvas-stage"
               data-animate="true"
-              className={`flex w-full ${activeAspectConfig.maxWidth} ${activeAspectConfig.aspectClass} items-center justify-center rounded-2xl border border-border bg-background shadow-2xl overflow-hidden transition-all duration-300 ease-in-out`}
+              className={`flex w-full ${activeTemplate.maxWidth} ${activeTemplate.aspectClass} items-center justify-center rounded-2xl border border-border bg-background shadow-2xl overflow-hidden transition-all duration-300 ease-in-out`}
             >
               <iframe
                 ref={iframeRef}
@@ -1196,7 +1248,41 @@ function ProjectEditor() {
               High-Fidelity Export Engine
             </p>
 
+            {/* Social Media Format Preset Selector */}
             <div className="mt-3">
+              <p className="text-[10.5px] font-medium uppercase tracking-wider text-muted-foreground mb-2">
+                Social Media Format Preset
+              </p>
+              <div className="grid grid-cols-2 gap-2">
+                {(Object.keys(SOCIAL_TEMPLATES) as SocialTemplateId[]).map((tId) => {
+                  const t = SOCIAL_TEMPLATES[tId];
+                  const isSel = selectedTemplate === tId;
+                  return (
+                    <button
+                      key={tId}
+                      id={`preset-card-${tId}`}
+                      type="button"
+                      onClick={() => setSelectedTemplate(tId)}
+                      className={`p-2.5 rounded-xl border text-left transition-all ${
+                        isSel
+                          ? "border-primary bg-primary/10 text-primary font-semibold shadow-sm"
+                          : "border-border bg-surface-2 text-muted-foreground hover:text-foreground hover:border-primary/40"
+                      }`}
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-sm">{t.icon}</span>
+                        <span className="text-[11px] font-semibold text-foreground">{t.label}</span>
+                      </div>
+                      <p className="mt-1 text-[10px] font-mono text-muted-foreground">
+                        {t.resolution} ({t.aspectRatio})
+                      </p>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <div className="mt-4">
               <p className="text-[10.5px] font-medium uppercase tracking-wider text-muted-foreground mb-2">
                 Background Style
               </p>

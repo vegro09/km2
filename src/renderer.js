@@ -154,22 +154,21 @@ export async function renderVideo(options = {}) {
     // 2. Force Canvas Centering & Reset Injection
     await page.addStyleTag({
       content: `
-        html, body {
-          width: 100vw !important;
-          height: 100vh !important;
-          margin: 0 !important;
-          padding: 0 !important;
+        body, html {
+          width: ${width}px !important;
+          height: ${height}px !important;
           display: flex !important;
           justify-content: center !important;
           align-items: center !important;
-          background: transparent !important;
+          margin: 0 !important;
+          padding: 0 !important;
           overflow: hidden !important;
+          background: transparent !important;
         }
-        #kanto-root, #app-viewport, #target-animation-element {
-          transform-origin: center center;
+        #target-component-wrapper, #kanto-root, #app-viewport {
+          transform-origin: center center !important;
+          flex-shrink: 0 !important;
           position: relative !important;
-          width: ${width}px !important;
-          height: ${height}px !important;
         }
       `
     });
