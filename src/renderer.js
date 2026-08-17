@@ -343,21 +343,6 @@ export async function renderVideo(options = {}) {
       });
     }
 
-    // 4. Exact Bounding Box & Target Element Reference
-    const animElement = await page.$('#target-animation-element') || await page.$('#kanto-root') || await page.$('#app-viewport');
-    let clipArea = null;
-    if (animElement) {
-      const box = await animElement.boundingBox();
-      if (box && box.width > 0 && box.height > 0) {
-        clipArea = {
-          x: Math.max(0, Math.floor(box.x)),
-          y: Math.max(0, Math.floor(box.y)),
-          width: Math.min(width, Math.ceil(box.width)),
-          height: Math.min(height, Math.ceil(box.height))
-        };
-      }
-    }
-
     for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
       const targetTimeSec = (frameIndex / (totalFrames - 1 || 1)) * exactDuration;
 
@@ -374,15 +359,10 @@ export async function renderVideo(options = {}) {
         }
       }, targetTimeSec);
 
-      const screenshotOpts = {
+      const frameBuffer = await page.screenshot({
         type: 'png',
         omitBackground: transparent
-      };
-      if (clipArea) {
-        screenshotOpts.clip = clipArea;
-      }
-
-      const frameBuffer = await page.screenshot(screenshotOpts);
+      });
 
       if (format === 'png-sequence' && archive) {
         const fileName = `frame_${String(frameIndex).padStart(4, '0')}.png`;

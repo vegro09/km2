@@ -34,8 +34,8 @@ export interface AspectRatioConfig {
   category: string;
   width: number;
   height: number;
-  aspectClass: string;
-  maxWidth: string;
+  displayWidth: string;
+  displayHeight: string;
   resolution: string;
   ratioFraction: string;
 }
@@ -49,8 +49,8 @@ export const ASPECT_RATIO_CONFIGS: Record<AspectRatioMode, AspectRatioConfig> = 
     category: "YouTube / Desktop",
     width: 1920,
     height: 1080,
-    aspectClass: "aspect-[16/9]",
-    maxWidth: "max-w-[880px]",
+    displayWidth: "min(100%, 880px)",
+    displayHeight: "auto",
     resolution: "1920 × 1080",
     ratioFraction: "16/9"
   },
@@ -62,8 +62,8 @@ export const ASPECT_RATIO_CONFIGS: Record<AspectRatioMode, AspectRatioConfig> = 
     category: "Reels / TikTok",
     width: 1080,
     height: 1920,
-    aspectClass: "aspect-[9/16]",
-    maxWidth: "max-w-[340px]",
+    displayWidth: "auto",
+    displayHeight: "min(560px, calc(100vh - 220px))",
     resolution: "1080 × 1920",
     ratioFraction: "9/16"
   },
@@ -75,8 +75,8 @@ export const ASPECT_RATIO_CONFIGS: Record<AspectRatioMode, AspectRatioConfig> = 
     category: "Feed Posts",
     width: 1080,
     height: 1080,
-    aspectClass: "aspect-square",
-    maxWidth: "max-w-[480px]",
+    displayWidth: "auto",
+    displayHeight: "min(500px, calc(100vh - 220px))",
     resolution: "1080 × 1080",
     ratioFraction: "1/1"
   },
@@ -88,8 +88,8 @@ export const ASPECT_RATIO_CONFIGS: Record<AspectRatioMode, AspectRatioConfig> = 
     category: "Instagram / LinkedIn",
     width: 1080,
     height: 1350,
-    aspectClass: "aspect-[4/5]",
-    maxWidth: "max-w-[420px]",
+    displayWidth: "auto",
+    displayHeight: "min(540px, calc(100vh - 220px))",
     resolution: "1080 × 1350",
     ratioFraction: "4/5"
   },
@@ -101,8 +101,8 @@ export const ASPECT_RATIO_CONFIGS: Record<AspectRatioMode, AspectRatioConfig> = 
     category: "Ultrawide Cinema",
     width: 2560,
     height: 1080,
-    aspectClass: "aspect-[2560/1080]",
-    maxWidth: "max-w-[1020px]",
+    displayWidth: "min(100%, 1020px)",
+    displayHeight: "auto",
     resolution: "2560 × 1080",
     ratioFraction: "64/27"
   }
@@ -1083,17 +1083,17 @@ function ProjectEditor() {
               data-animate="true"
               style={{
                 aspectRatio: `${activeAspectConfig.width} / ${activeAspectConfig.height}`,
-                maxHeight: "min(580px, calc(100vh - 220px))",
-                maxWidth: activeAspectConfig.maxWidth,
-                width: "100%",
-                height: "auto"
+                width: activeAspectConfig.displayWidth,
+                height: activeAspectConfig.displayHeight,
+                maxHeight: "min(560px, calc(100vh - 220px))",
+                maxWidth: "100%"
               }}
-              className={`flex ${activeAspectConfig.aspectClass} items-center justify-center rounded-2xl border border-border bg-background shadow-2xl overflow-hidden transition-all duration-300 ease-in-out relative`}
+              className="flex items-center justify-center rounded-2xl border border-border bg-background shadow-2xl overflow-hidden transition-all duration-300 ease-in-out relative shrink-0"
             >
               <iframe
                 ref={iframeRef}
                 title="Live DOM Canvas"
-                className="w-full h-full border-0 bg-transparent"
+                className="w-full h-full border-0 bg-transparent block"
               />
             </div>
           </div>
