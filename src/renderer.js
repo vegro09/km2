@@ -13,17 +13,41 @@ import ffmpegPath from 'ffmpeg-static';
 import { ZipArchive } from 'archiver';
 
 export const SOCIAL_PRESETS = {
+  // 1. Widescreen (16:9): 1920x1080 (YouTube / Desktop)
+  '16:9': { width: 1920, height: 1080, aspectRatio: '16:9', name: 'Widescreen (16:9)' },
+  'widescreen': { width: 1920, height: 1080, aspectRatio: '16:9', name: 'Widescreen (16:9)' },
+  'youtube': { width: 1920, height: 1080, aspectRatio: '16:9', name: 'YouTube / Desktop' },
+  'landscape': { width: 1920, height: 1080, aspectRatio: '16:9', name: 'Landscape (16:9)' },
+  'desktop': { width: 1920, height: 1080, aspectRatio: '16:9', name: 'Desktop (16:9)' },
+  'hd': { width: 1920, height: 1080, aspectRatio: '16:9', name: 'Full HD 1080p' },
+
+  // 2. Vertical (9:16): 1080x1920 (Reels / TikTok)
+  '9:16': { width: 1080, height: 1920, aspectRatio: '9:16', name: 'Vertical (9:16)' },
+  'vertical': { width: 1080, height: 1920, aspectRatio: '9:16', name: 'Vertical (9:16)' },
   'tiktok': { width: 1080, height: 1920, aspectRatio: '9:16', name: 'TikTok / Reels / Shorts' },
   'reels': { width: 1080, height: 1920, aspectRatio: '9:16', name: 'TikTok / Reels / Shorts' },
   'shorts': { width: 1080, height: 1920, aspectRatio: '9:16', name: 'TikTok / Reels / Shorts' },
   'story': { width: 1080, height: 1920, aspectRatio: '9:16', name: 'Instagram Story' },
+
+  // 3. Square (1:1): 1080x1080 (Feed Posts)
+  '1:1': { width: 1080, height: 1080, aspectRatio: '1:1', name: 'Square (1:1)' },
+  'square': { width: 1080, height: 1080, aspectRatio: '1:1', name: 'Square (1:1)' },
   'instagram-square': { width: 1080, height: 1080, aspectRatio: '1:1', name: 'Instagram Square Post' },
-  'square': { width: 1080, height: 1080, aspectRatio: '1:1', name: 'Square 1:1' },
+  'feed': { width: 1080, height: 1080, aspectRatio: '1:1', name: 'Feed Post (1:1)' },
+
+  // 4. Portrait (4:5): 1080x1350 (Instagram/LinkedIn Standard Posts)
+  '4:5': { width: 1080, height: 1350, aspectRatio: '4:5', name: 'Portrait (4:5)' },
+  'portrait': { width: 1080, height: 1350, aspectRatio: '4:5', name: 'Portrait (4:5)' },
   'instagram-portrait': { width: 1080, height: 1350, aspectRatio: '4:5', name: 'Instagram Portrait Post' },
-  'portrait': { width: 1080, height: 1350, aspectRatio: '4:5', name: 'Portrait 4:5' },
-  'youtube': { width: 1920, height: 1080, aspectRatio: '16:9', name: 'YouTube / HD Landscape' },
-  'landscape': { width: 1920, height: 1080, aspectRatio: '16:9', name: 'Landscape 16:9' },
-  'hd': { width: 1920, height: 1080, aspectRatio: '16:9', name: 'Full HD 1080p' },
+  'linkedin': { width: 1080, height: 1350, aspectRatio: '4:5', name: 'LinkedIn / Instagram (4:5)' },
+
+  // 5. Cinematic (21:9): 2560x1080 (Ultrawide Cinematic Animations)
+  '21:9': { width: 2560, height: 1080, aspectRatio: '21:9', name: 'Cinematic (21:9)' },
+  'cinematic': { width: 2560, height: 1080, aspectRatio: '21:9', name: 'Cinematic (21:9)' },
+  'ultrawide': { width: 2560, height: 1080, aspectRatio: '21:9', name: 'Ultrawide Cinema (21:9)' },
+  '21x9': { width: 2560, height: 1080, aspectRatio: '21:9', name: 'Cinematic (21:9)' },
+
+  // Ultra HD
   '4k': { width: 3840, height: 2160, aspectRatio: '16:9', name: 'Ultra HD 4K' }
 };
 
@@ -154,21 +178,22 @@ export async function renderVideo(options = {}) {
     // 2. Force Canvas Centering & Reset Injection
     await page.addStyleTag({
       content: `
-        body, html {
-          width: ${width}px !important;
-          height: ${height}px !important;
+        html, body {
+          width: 100vw !important;
+          height: 100vh !important;
+          margin: 0 !important;
+          padding: 0 !important;
           display: flex !important;
           justify-content: center !important;
           align-items: center !important;
-          margin: 0 !important;
-          padding: 0 !important;
-          overflow: hidden !important;
           background: transparent !important;
+          overflow: hidden !important;
         }
-        #target-component-wrapper, #kanto-root, #app-viewport {
-          transform-origin: center center !important;
-          flex-shrink: 0 !important;
+        #kanto-root, #app-viewport, #target-animation-element {
+          transform-origin: center center;
           position: relative !important;
+          width: ${width}px !important;
+          height: ${height}px !important;
         }
       `
     });

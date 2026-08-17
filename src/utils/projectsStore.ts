@@ -1,14 +1,14 @@
+export type AspectRatioMode = "16:9" | "9:16" | "1:1" | "4:5" | "21:9";
+
 export interface Project {
   id: string;
   title: string;
   html: string;
   css: string;
   js: string;
-  aspectRatio: string;
+  aspectRatio: AspectRatioMode;
   updatedAt: string;
   kind?: string;
-  previewKind?: string;
-  duration?: string;
 }
 
 const STORAGE_KEY = "kanto_motion_projects";
